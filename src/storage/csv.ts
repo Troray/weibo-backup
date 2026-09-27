@@ -62,6 +62,21 @@ function getCachedCommentIds(csvPath: string): Set<string> {
   return ids;
 }
 
+const UTF8_BOM = '\uFEFF';
+
+function ensureBom(filePath: string): void {
+  try {
+    if (fs.existsSync(filePath)) {
+      const buf = fs.readFileSync(filePath);
+      if (buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) {
+        return;
+      }
+      const bomBuffer = Buffer.from([0xef, 0xbb, 0xbf]);
+      fs.writeFileSync(filePath, Buffer.concat([bomBuffer, buf]));
+    }
+  } catch {}
+}
+
 export async function appendPostToCsv(post: ParsedPost, userDir: string, monthSubDir: string): Promise<void> {
   const dir = path.join(userDir, monthSubDir);
   if (!fs.existsSync(dir)) {
@@ -102,7 +117,10 @@ export async function appendPostToCsv(post: ParsedPost, userDir: string, monthSu
     try {
       const content = fs.readFileSync(csvPath, 'utf8');
       const lines = content.split('\n');
-      const header = lines[0];
+      let header = lines[0];
+      if (!header.startsWith(UTF8_BOM)) {
+        header = UTF8_BOM + header;
+      }
       const dataLines = lines.slice(1);
       const updatedLines: string[] = [];
 
@@ -122,9 +140,11 @@ export async function appendPostToCsv(post: ParsedPost, userDir: string, monthSu
     } catch {}
   }
 
-  // Ensure atomic file appending
+  // Ensure atomic file appending with UTF-8 BOM for Excel compatibility
   if (!fileExists) {
-    fs.writeFileSync(csvPath, headers, 'utf8');
+    fs.writeFileSync(csvPath, UTF8_BOM + headers, 'utf8');
+  } else {
+    ensureBom(csvPath);
   }
   fs.appendFileSync(csvPath, rowStr, 'utf8');
   knownIds.add(post.id);
@@ -160,7 +180,9 @@ export async function appendCommentsToCsv(comments: ParsedComment[], userDir: st
   const existingCommentIds = getCachedCommentIds(csvPath);
 
   if (!fileExists) {
-    fs.writeFileSync(csvPath, headers, 'utf8');
+    fs.writeFileSync(csvPath, UTF8_BOM + headers, 'utf8');
+  } else {
+    ensureBom(csvPath);
   }
 
   let appendData = '';
