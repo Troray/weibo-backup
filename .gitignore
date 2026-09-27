@@ -1,0 +1,78 @@
+# Node.js 依赖目录
+node_modules/
+
+# TS 编译输出目录
+dist/
+
+# 内部开发文档与提示词（按需本地保留，不公开上传）
+Docs/
+
+# 本地环境变量配置文件
+.env
+.env.local
+.env.production
+.env.development
+
+# 微博登录会话状态缓存文件及备份副本（包含敏感登录凭证，请勿提交！）
+state.json
+state*.json
+*state*.json
+*.session
+cookies.json
+cookie*.txt
+
+# 本地目标博主配置文件（个人定制/包含博主列表与游标，请勿提交）
+userid.txt
+
+# 本地抓取输出目录（包含下载的图片、视频、Markdown、CSV、JSON）
+output/
+test_output/
+
+# 数据库文件（支持 SQLite/WAL/Journal 各类后缀）
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+
+# 日志输出目录与包管理器日志
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# 系统临时文件
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+._*
+
+# 编辑器与 IDE 配置
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+
+# 临时与备份文件
+*.swp
+*.swo
+*~
+*.tmp
+*.temp
+*.bak
+
+# 构建缓存与测试覆盖率
+*.tsbuildinfo
+coverage/
+.nyc_output/
+
+# 本地临时/缓存/草稿目录与运行状态
+/storage/
+scratch/
