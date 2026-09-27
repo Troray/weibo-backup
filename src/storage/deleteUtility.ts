@@ -86,7 +86,7 @@ function deleteMediaCandidates(userDir: string, monthDir: string, fileRef: strin
 
   // If fileRef is a full URL (CDN URL), extract the filename
   if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
-    const ext = trimmed.includes('.mp4') ? '.mp4' : trimmed.includes('.mov') ? '.mov' : '.jpg';
+    const ext = trimmed.includes('.mp4') ? '.mp4' : trimmed.includes('.mov') ? '.mov' : trimmed.includes('.aac') ? '.aac' : trimmed.includes('.mp3') ? '.mp3' : '.jpg';
     const filename = getFilenameFromUrl(trimmed, ext);
     if (!filename) return false;
     trimmed = filename;
@@ -108,6 +108,7 @@ function deleteMediaCandidates(userDir: string, monthDir: string, fileRef: strin
     candidates.push(path.join(userDir, 'comment_img', basename));
     candidates.push(path.join(userDir, 'video', basename));
     candidates.push(path.join(userDir, 'livephoto', basename));
+    candidates.push(path.join(userDir, 'audio', basename));
   }
 
   if (monthDir) {
@@ -117,6 +118,7 @@ function deleteMediaCandidates(userDir: string, monthDir: string, fileRef: strin
     candidates.push(path.join(monthDir, 'comment_img', basename));
     candidates.push(path.join(monthDir, 'video', basename));
     candidates.push(path.join(monthDir, 'livephoto', basename));
+    candidates.push(path.join(monthDir, 'audio', basename));
   }
 
   const safeRoot = path.resolve(config.OUTPUT_DIR);
@@ -413,12 +415,14 @@ export async function deletePostData(urlOrBidOrMid: string): Promise<{ success: 
           parseMediaList(cols[11]).forEach(f => mediaFilesToDelete.add(f));
           parseMediaList(cols[12]).forEach(f => mediaFilesToDelete.add(f));
           parseMediaList(cols[13]).forEach(f => mediaFilesToDelete.add(f));
+          if (cols[14]) parseMediaList(cols[14]).forEach(f => mediaFilesToDelete.add(f));
+          if (cols[15]) parseMediaList(cols[15]).forEach(f => mediaFilesToDelete.add(f));
         }
       }
     } catch {}
   }
 
-  // Also check Markdown file for image and video references inside this post's block
+  // Also check Markdown file for image, video, and audio references inside this post's block
   const mdPath = path.join(monthDir, `${datePart}.md`);
   if (fs.existsSync(mdPath)) {
     try {
@@ -435,7 +439,7 @@ export async function deletePostData(urlOrBidOrMid: string): Promise<{ success: 
         while ((match = mdImgRegex.exec(block)) !== null) {
           mediaFilesToDelete.add(match[1]);
         }
-        const htmlSrcRegex = /<(?:img|video)[^>]*src="([^"]+)"/gi;
+        const htmlSrcRegex = /<(?:img|video|audio)[^>]*src="([^"]+)"/gi;
         while ((match = htmlSrcRegex.exec(block)) !== null) {
           mediaFilesToDelete.add(match[1]);
         }

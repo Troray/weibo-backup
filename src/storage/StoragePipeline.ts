@@ -61,13 +61,14 @@ export class StoragePipeline {
     };
 
     // 2. Download media assets concurrently
-    logger.info(`开始为微博 ${post.id} 下载媒体资源... (图片: ${post.cdn_images.length} 张, 视频: ${post.cdn_videos.length} 个, 实况: ${post.cdn_livephotos.length} 个, 类型: ${post.is_retweet ? '转发' : '原创'})`);
+    logger.info(`开始为微博 ${post.id} 下载媒体资源... (图片: ${post.cdn_images.length} 张, 视频: ${post.cdn_videos.length} 个, 实况: ${post.cdn_livephotos.length} 个, 语音: ${post.cdn_audios?.length || 0} 个, 类型: ${post.is_retweet ? '转发' : '原创'})`);
     try {
       const localMedia = await this.downloader.downloadPostMedia(
         post.id,
         post.cdn_images,
         post.cdn_videos,
         post.cdn_livephotos,
+        post.cdn_audios || [],
         userDir,
         monthSubDir,
         post.is_retweet
@@ -76,6 +77,7 @@ export class StoragePipeline {
       enrichedPost.local_images = localMedia.localImages;
       enrichedPost.local_videos = localMedia.localVideos;
       enrichedPost.local_livephotos = localMedia.localLivePhotos;
+      enrichedPost.local_audios = localMedia.localAudios;
     } catch (mediaErr) {
       logger.error(`为微博 ${post.id} 下载媒体资源出错:`, mediaErr);
     }

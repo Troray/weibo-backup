@@ -42,7 +42,9 @@ export interface ScraperConfig {
   // 抓取行为控制配置
   ONLY_ORIGINAL: boolean; // 是否仅抓取原创微博（排除转发）
   SCRAPE_COMMENTS: boolean; // 是否抓取评论区
-  MAX_COMMENTS_PER_POST: number; // 单条微博最大抓取评论数
+  MAX_COMMENTS_PER_POST: number; // 单条微博最大抓取评论数 (0为不限)
+  COMMENT_FLOW: number; // 评论排序模式：0=按热度排序 (默认)，1=按时间排序
+  MAX_SUB_COMMENTS_PER_COMMENT: number; // 单条主评论最大抓取子评论(楼中楼)数
   REQUEST_DELAY_MIN: number; // 评论抓取最小延迟（毫秒）
   REQUEST_DELAY_MAX: number; // 评论抓取最大延迟（毫秒）
   
@@ -50,9 +52,11 @@ export interface ScraperConfig {
   DOWNLOAD_ORIGINAL_IMAGES: boolean; // 是否下载原创微博的高清大图
   DOWNLOAD_ORIGINAL_VIDEOS: boolean; // 是否下载原创微博的超清视频
   DOWNLOAD_ORIGINAL_LIVEPHOTOS: boolean; // 是否下载原创微博的实况照片 (Live Photo)
+  DOWNLOAD_ORIGINAL_AUDIOS: boolean; // 是否下载原创微博的语音音频
   DOWNLOAD_RETWEET_IMAGES: boolean; // 是否下载转发微博的媒体图片
   DOWNLOAD_RETWEET_VIDEOS: boolean; // 是否下载转发微博的媒体视频
   DOWNLOAD_RETWEET_LIVEPHOTOS: boolean; // 是否下载转发微博的实况照片 (Live Photo)
+  DOWNLOAD_RETWEET_AUDIOS: boolean; // 是否下载转发微博的语音音频
   DOWNLOAD_COMMENT_MEDIA: boolean; // 是否下载评论区中包含的媒体文件
   CONCURRENT_DOWNLOADS: number; // 媒体文件并发下载限制数
   
@@ -118,15 +122,19 @@ export const config: ScraperConfig = {
   ONLY_ORIGINAL: getEnvBool('ONLY_ORIGINAL', false),
   SCRAPE_COMMENTS: getEnvBool('SCRAPE_COMMENTS', true),
   MAX_COMMENTS_PER_POST: getEnvNum('MAX_COMMENTS_PER_POST', 50),
+  COMMENT_FLOW: getEnvNum('COMMENT_FLOW', 0),
+  MAX_SUB_COMMENTS_PER_COMMENT: getEnvNum('MAX_SUB_COMMENTS_PER_COMMENT', 50),
   REQUEST_DELAY_MIN: getEnvNum('REQUEST_DELAY_MIN', 1500),
   REQUEST_DELAY_MAX: getEnvNum('REQUEST_DELAY_MAX', 3000),
   
   DOWNLOAD_ORIGINAL_IMAGES: getEnvBool('DOWNLOAD_ORIGINAL_IMAGES', true),
   DOWNLOAD_ORIGINAL_VIDEOS: getEnvBool('DOWNLOAD_ORIGINAL_VIDEOS', true),
   DOWNLOAD_ORIGINAL_LIVEPHOTOS: getEnvBool('DOWNLOAD_ORIGINAL_LIVEPHOTOS', true),
+  DOWNLOAD_ORIGINAL_AUDIOS: getEnvBool('DOWNLOAD_ORIGINAL_AUDIOS', true),
   DOWNLOAD_RETWEET_IMAGES: getEnvBool('DOWNLOAD_RETWEET_IMAGES', false),
   DOWNLOAD_RETWEET_VIDEOS: getEnvBool('DOWNLOAD_RETWEET_VIDEOS', false),
   DOWNLOAD_RETWEET_LIVEPHOTOS: getEnvBool('DOWNLOAD_RETWEET_LIVEPHOTOS', false),
+  DOWNLOAD_RETWEET_AUDIOS: getEnvBool('DOWNLOAD_RETWEET_AUDIOS', false),
   DOWNLOAD_COMMENT_MEDIA: getEnvBool('DOWNLOAD_COMMENT_MEDIA', false),
   CONCURRENT_DOWNLOADS: getEnvNum('CONCURRENT_DOWNLOADS', 10),
   

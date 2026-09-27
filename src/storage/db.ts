@@ -71,6 +71,9 @@ export async function initializeSchema(db: Knex): Promise<void> {
       table.text('local_videos');
       table.text('cdn_livephotos');
       table.text('local_livephotos');
+      table.text('cdn_audios');
+      table.text('local_audios');
+      table.text('audio_transcript');
       table.boolean('is_retweet');
       table.string('retweeted_id');
       table.string('retweeted_user');
@@ -78,6 +81,17 @@ export async function initializeSchema(db: Knex): Promise<void> {
       table.timestamps(true, true);
     });
     logger.info('Table "posts" created.');
+  } else {
+    // Migration: check if audio columns exist in existing posts table
+    const hasAudiosCol = await db.schema.hasColumn('posts', 'local_audios');
+    if (!hasAudiosCol) {
+      await db.schema.alterTable('posts', (table) => {
+        table.text('cdn_audios');
+        table.text('local_audios');
+        table.text('audio_transcript');
+      });
+      logger.info('Migrated table "posts": added audio columns.');
+    }
   }
 
   // Create comments table
@@ -114,12 +128,15 @@ export async function upsertPost(db: Knex, post: any): Promise<void> {
     attitudes_count: post.attitudes_count,
     device: post.device,
     ip_location: post.ip_location,
-    cdn_images: JSON.stringify(post.cdn_images),
-    local_images: JSON.stringify(post.local_images),
-    cdn_videos: JSON.stringify(post.cdn_videos),
-    local_videos: JSON.stringify(post.local_videos),
-    cdn_livephotos: JSON.stringify(post.cdn_livephotos),
-    local_livephotos: JSON.stringify(post.local_livephotos),
+    cdn_images: JSON.stringify(post.cdn_images || []),
+    local_images: JSON.stringify(post.local_images || []),
+    cdn_videos: JSON.stringify(post.cdn_videos || []),
+    local_videos: JSON.stringify(post.local_videos || []),
+    cdn_livephotos: JSON.stringify(post.cdn_livephotos || []),
+    local_livephotos: JSON.stringify(post.local_livephotos || []),
+    cdn_audios: JSON.stringify(post.cdn_audios || []),
+    local_audios: JSON.stringify(post.local_audios || []),
+    audio_transcript: post.audio_transcript || '',
     is_retweet: post.is_retweet,
     retweeted_id: post.retweeted_id,
     retweeted_user: post.retweeted_user,

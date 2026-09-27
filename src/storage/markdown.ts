@@ -4,6 +4,16 @@ import { ParsedPost, ParsedComment } from '../scraper/parser';
 import { logger } from '../utils/logger';
 
 /**
+ * Media helper to strip YYYY-MM/ prefix to make paths relative to the daily MD file
+ */
+function getRelativePath(p: string): string {
+  if (!p) return '';
+  const normalized = p.replace(/\\/g, '/');
+  const idx = normalized.indexOf('/');
+  return idx !== -1 ? normalized.substring(idx + 1) : normalized;
+}
+
+/**
  * Appends a parsed post (with its comments) to a daily Markdown file.
  * Path format: output/博主昵称/YYYY-MM/YYYY-MM-DD.md
  */
@@ -41,6 +51,16 @@ export async function appendPostToMarkdown(
   postBlock += `📅 **发布时间**: ${post.time} | 📱 **发布设备**: ${post.device || '未知'} | 📍 **发布位置**: ${post.ip_location || '未知'}\n`;
   postBlock += `🔁 **转发**: ${post.reposts_count} | 💬 **评论**: ${post.comments_count} | 👍 **点赞**: ${post.attitudes_count}\n\n`;
 
+  // Audio and transcript section (如果有语音音频排在正文最前面)
+  if (post.local_audios && post.local_audios.length > 0) {
+    postBlock += `### 🎙️ 语音 (Audio)\n\n`;
+    const audioList = post.local_audios.map(aud => `<audio src="${getRelativePath(aud)}" controls></audio>`);
+    postBlock += audioList.join('\n\n') + '\n\n';
+    if (post.audio_transcript) {
+      postBlock += `> 📝 **语音转写**: ${post.audio_transcript}\n\n`;
+    }
+  }
+
   postBlock += `### 💬 正文\n\n${post.content}\n\n`;
 
   // Retweet source status block
@@ -48,14 +68,6 @@ export async function appendPostToMarkdown(
     postBlock += `> 🔁 **转发自**: @${post.retweeted_user || '未知'}\n`;
     postBlock += `> **原博内容**: ${post.retweeted_content || '未知'}\n\n`;
   }
-
-  // Image media helper (strip YYYY-MM/ prefix to make paths relative to this MD file)
-  const getRelativePath = (p: string) => {
-    if (!p) return '';
-    const normalized = p.replace(/\\/g, '/');
-    const idx = normalized.indexOf('/');
-    return idx !== -1 ? normalized.substring(idx + 1) : normalized;
-  };
 
   if (post.local_images && post.local_images.length > 0) {
     postBlock += `### 📷 图片\n\n`;

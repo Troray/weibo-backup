@@ -12,7 +12,7 @@ export interface DownloadTask {
   url: string;
   destPath: string;
   postId: string;
-  mediaType: 'image' | 'video' | 'livephoto';
+  mediaType: 'image' | 'video' | 'livephoto' | 'audio';
 }
 
 export class MediaDownloader {
@@ -90,20 +90,23 @@ export class MediaDownloader {
     cdnImages: string[],
     cdnVideos: string[],
     cdnLivePhotos: string[],
+    cdnAudios: string[] = [],
     userDir: string,
     monthSubDir: string,
     isRetweet = false
-  ): Promise<{ localImages: string[]; localVideos: string[]; localLivePhotos: string[] }> {
+  ): Promise<{ localImages: string[]; localVideos: string[]; localLivePhotos: string[]; localAudios: string[] }> {
     const tasks: DownloadTask[] = [];
 
     // Form folders
     const imgDir = path.join(userDir, monthSubDir, 'img');
     const videoDir = path.join(userDir, monthSubDir, 'video');
     const livePhotoDir = path.join(userDir, monthSubDir, 'livephoto');
+    const audioDir = path.join(userDir, monthSubDir, 'audio');
 
     const shouldDownloadImages = isRetweet ? config.DOWNLOAD_RETWEET_IMAGES : config.DOWNLOAD_ORIGINAL_IMAGES;
     const shouldDownloadVideos = isRetweet ? config.DOWNLOAD_RETWEET_VIDEOS : config.DOWNLOAD_ORIGINAL_VIDEOS;
     const shouldDownloadLivePhotos = isRetweet ? config.DOWNLOAD_RETWEET_LIVEPHOTOS : config.DOWNLOAD_ORIGINAL_LIVEPHOTOS;
+    const shouldDownloadAudios = isRetweet ? config.DOWNLOAD_RETWEET_AUDIOS : config.DOWNLOAD_ORIGINAL_AUDIOS;
 
     // Queue images
     if (shouldDownloadImages) {
@@ -144,8 +147,21 @@ export class MediaDownloader {
       }
     }
 
+    // Queue audios
+    if (shouldDownloadAudios) {
+      for (const url of cdnAudios) {
+        const filename = this.getFilenameFromUrl(url, '.aac');
+        tasks.push({
+          url,
+          destPath: path.join(audioDir, filename),
+          postId,
+          mediaType: 'audio'
+        });
+      }
+    }
+
     if (tasks.length === 0) {
-      return { localImages: [], localVideos: [], localLivePhotos: [] };
+      return { localImages: [], localVideos: [], localLivePhotos: [], localAudios: [] };
     }
 
     // Increment progress counts
@@ -155,10 +171,12 @@ export class MediaDownloader {
     const localImages: string[] = [];
     const localVideos: string[] = [];
     const localLivePhotos: string[] = [];
+    const localAudios: string[] = [];
 
     // Run parallel downloads
     await this.runWithLimit(this.limit, tasks, async (task) => {
-      const relativePath = path.join(monthSubDir, task.mediaType === 'image' ? 'img' : task.mediaType === 'video' ? 'video' : 'livephoto', path.basename(task.destPath)).replace(/\\/g, '/');
+      const sub = task.mediaType === 'image' ? 'img' : task.mediaType === 'video' ? 'video' : task.mediaType === 'livephoto' ? 'livephoto' : 'audio';
+      const relativePath = path.join(monthSubDir, sub, path.basename(task.destPath)).replace(/\\/g, '/');
       
       const success = await this.downloadWithRetry(task.url, task.destPath);
       if (success) {
@@ -168,6 +186,8 @@ export class MediaDownloader {
           localVideos.push(relativePath);
         } else if (task.mediaType === 'livephoto') {
           localLivePhotos.push(relativePath);
+        } else if (task.mediaType === 'audio') {
+          localAudios.push(relativePath);
         }
       }
       this.completedTasks++;
@@ -178,7 +198,7 @@ export class MediaDownloader {
       this.finishProgress();
     }
 
-    return { localImages, localVideos, localLivePhotos };
+    return { localImages, localVideos, localLivePhotos, localAudios };
   }
 
   /**
@@ -323,6 +343,14 @@ export class MediaDownloader {
         }
       }
 
+      // 3. For Audio files, attempt to extract authentic audio filename if present
+      if (defaultExt === '.aac' || defaultExt === '.mp3') {
+        const audioMatch = urlStr.match(/([a-zA-Z0-9_\-]+\.(?:aac|mp3|m4a|wav))/i);
+        if (audioMatch && audioMatch[1]) {
+          return audioMatch[1];
+        }
+      }
+
       const parsed = new URL(urlStr);
       let filename = path.basename(parsed.pathname);
       if (filename.includes('?')) {
@@ -332,9 +360,11 @@ export class MediaDownloader {
         filename = decodeURIComponent(filename);
       } catch {}
 
-      if (!filename || !filename.includes('.')) {
+      if (!filename) {
         const hash = crypto.createHash('md5').update(urlStr).digest('hex').substring(0, 10);
         filename = `${hash}${defaultExt}`;
+      } else if (!filename.includes('.')) {
+        filename = `${filename}${defaultExt}`;
       } else if (defaultExt === '.mov' && !filename.toLowerCase().endsWith('.mov')) {
         const ext = path.extname(filename);
         filename = ext ? filename.substring(0, filename.length - ext.length) + '.mov' : `${filename}.mov`;

@@ -15,6 +15,9 @@ export interface ParsedPost {
   local_videos: string[];
   cdn_livephotos: string[];
   local_livephotos: string[];
+  cdn_audios: string[];
+  local_audios: string[];
+  audio_transcript?: string;
   is_retweet: boolean;
   retweeted_id?: string | null;
   retweeted_user?: string | null;
@@ -131,7 +134,7 @@ export function parsePost(raw: any): ParsedPost {
     }
   }
 
-  const { images, videos, livePhotos } = extractMedia(mediaSource);
+  const { images, videos, livePhotos, audios, audioTranscript } = extractMedia(mediaSource);
 
   return {
     id,
@@ -148,6 +151,9 @@ export function parsePost(raw: any): ParsedPost {
     local_videos: [], // filled by MediaDownloader
     cdn_livephotos: livePhotos,
     local_livephotos: [], // filled by MediaDownloader
+    cdn_audios: audios,
+    local_audios: [], // filled by MediaDownloader
+    audio_transcript: audioTranscript,
     is_retweet,
     retweeted_id,
     retweeted_user,
@@ -204,13 +210,25 @@ function extractBestImageUrl(pic: any): string | null {
  * Helper to extract media elements from status object, supporting traditional pic_infos/page_info,
  * new mix_media_info (for >9 pictures or mixed media/Live Photos), and pic_ids fallback.
  */
-function extractMedia(status: any): { images: string[]; videos: string[]; livePhotos: string[] } {
+function extractMedia(status: any): { images: string[]; videos: string[]; livePhotos: string[]; audios: string[]; audioTranscript?: string } {
   const imagesSet = new Set<string>();
   const videosSet = new Set<string>();
   const livePhotosSet = new Set<string>();
+  const audiosSet = new Set<string>();
+  let audioTranscript: string | undefined = undefined;
 
   if (!status) {
-    return { images: [], videos: [], livePhotos: [] };
+    return { images: [], videos: [], livePhotos: [], audios: [] };
+  }
+
+  // 0. Extract audio / voice messages if present (e.g. blog_audio)
+  if (status.blog_audio && typeof status.blog_audio === 'object') {
+    if (status.blog_audio.media_url) {
+      audiosSet.add(status.blog_audio.media_url);
+    }
+    if (status.blog_audio.transcript) {
+      audioTranscript = status.blog_audio.transcript;
+    }
   }
 
   // 1. Extract from new mix_media_info structure (Weibo API for >9 images or mixed media)
@@ -219,6 +237,15 @@ function extractMedia(status: any): { images: string[]; videos: string[]; livePh
       if (!item) continue;
       const type = item.type;
       const data = item.data || item;
+
+      // Extract Audio item if present in mix_media_info
+      if (type === 'audio' || data.media_category === 'audio') {
+        const audioUrl = data.media_url || data.stream_url || data.url;
+        if (audioUrl) audiosSet.add(audioUrl);
+        if (data.transcript && !audioTranscript) {
+          audioTranscript = data.transcript;
+        }
+      }
 
       // Extract Live Photo video stream (.mov) if present
       if (data.video) {
@@ -264,11 +291,16 @@ function extractMedia(status: any): { images: string[]; videos: string[]; livePh
     }
   }
 
-  // 3. Extract from traditional page_info.media_info (standard single video posts)
+  // 3. Extract from traditional page_info.media_info (standard single video posts or audio)
   if (status.page_info?.media_info) {
-    const videoUrl = extractBestVideoUrl(status.page_info.media_info);
-    if (videoUrl) {
-      videosSet.add(videoUrl);
+    if (status.page_info.type === 'audio' || status.page_info.media_category === 'audio') {
+      const audioUrl = status.page_info.media_info.stream_url_hd || status.page_info.media_info.stream_url;
+      if (audioUrl) audiosSet.add(audioUrl);
+    } else {
+      const videoUrl = extractBestVideoUrl(status.page_info.media_info);
+      if (videoUrl) {
+        videosSet.add(videoUrl);
+      }
     }
   }
 
@@ -292,7 +324,9 @@ function extractMedia(status: any): { images: string[]; videos: string[]; livePh
   return {
     images: Array.from(imagesSet),
     videos: Array.from(videosSet),
-    livePhotos: Array.from(livePhotosSet)
+    livePhotos: Array.from(livePhotosSet),
+    audios: Array.from(audiosSet),
+    audioTranscript
   };
 }
 

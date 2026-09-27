@@ -157,14 +157,19 @@ function updateConfigInMemory(key: string, value: string): void {
     case 'ONLY_ORIGINAL': conf.ONLY_ORIGINAL = parseBool(value); break;
     case 'SCRAPE_COMMENTS': conf.SCRAPE_COMMENTS = parseBool(value); break;
     case 'MAX_COMMENTS_PER_POST': conf.MAX_COMMENTS_PER_POST = parseNum(value); break;
+    case 'COMMENT_FLOW': conf.COMMENT_FLOW = parseNum(value); break;
+    case 'MAX_SUB_COMMENTS_PER_COMMENT': conf.MAX_SUB_COMMENTS_PER_COMMENT = parseNum(value); break;
     case 'REQUEST_DELAY_MIN': conf.REQUEST_DELAY_MIN = parseNum(value); break;
     case 'REQUEST_DELAY_MAX': conf.REQUEST_DELAY_MAX = parseNum(value); break;
     
     case 'DOWNLOAD_ORIGINAL_IMAGES': conf.DOWNLOAD_ORIGINAL_IMAGES = parseBool(value); break;
     case 'DOWNLOAD_ORIGINAL_VIDEOS': conf.DOWNLOAD_ORIGINAL_VIDEOS = parseBool(value); break;
     case 'DOWNLOAD_ORIGINAL_LIVEPHOTOS': conf.DOWNLOAD_ORIGINAL_LIVEPHOTOS = parseBool(value); break;
+    case 'DOWNLOAD_ORIGINAL_AUDIOS': conf.DOWNLOAD_ORIGINAL_AUDIOS = parseBool(value); break;
     case 'DOWNLOAD_RETWEET_IMAGES': conf.DOWNLOAD_RETWEET_IMAGES = parseBool(value); break;
     case 'DOWNLOAD_RETWEET_VIDEOS': conf.DOWNLOAD_RETWEET_VIDEOS = parseBool(value); break;
+    case 'DOWNLOAD_RETWEET_LIVEPHOTOS': conf.DOWNLOAD_RETWEET_LIVEPHOTOS = parseBool(value); break;
+    case 'DOWNLOAD_RETWEET_AUDIOS': conf.DOWNLOAD_RETWEET_AUDIOS = parseBool(value); break;
     case 'DOWNLOAD_COMMENT_MEDIA': conf.DOWNLOAD_COMMENT_MEDIA = parseBool(value); break;
     case 'CONCURRENT_DOWNLOADS': conf.CONCURRENT_DOWNLOADS = parseNum(value); break;
     

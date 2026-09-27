@@ -682,8 +682,6 @@ export class WeiboScraper {
   private async scrapeComments(postId: string, uid: string): Promise<ParsedComment[]> {
     const parsedComments: ParsedComment[] = [];
     const seenCommentIds = new Set<string>();
-    let maxId = '0';
-    let keepFetching = true;
     const limit = config.MAX_COMMENTS_PER_POST <= 0 ? Infinity : config.MAX_COMMENTS_PER_POST;
 
     const spinner = new Spinner(`正在获取微博 ID: ${postId} 的评论列表: 已获取 0 条...`);
@@ -693,65 +691,89 @@ export class WeiboScraper {
       logger.info(`正在获取微博 ID: ${postId} 的评论列表...`);
     }
 
-    while (keepFetching && parsedComments.length < limit) {
-      let commentsData: any = null;
-      try {
-        const url = `https://weibo.com/ajax/statuses/buildComments?flow=1&is_reload=1&id=${postId}&is_show_bulletin=2&is_mix=0&count=20&uid=${uid}${maxId !== '0' ? `&max_id=${maxId}` : ''}`;
-        const response = await this.makeRequest(url, {
-          method: 'GET',
-          headers: { 'Referer': `https://weibo.com/detail/${postId}` },
-          responseType: 'json'
-        });
-        commentsData = response.data;
-      } catch (err: any) {
-        spinner.stop();
-        logger.error(`获取微博 ${postId} 的评论失败: ${err.message}`);
-        break;
-      }
+    // Determine flow sequence: if default COMMENT_FLOW is 0 (按热度), we first fetch hot comments,
+    // and if limit is not reached, optionally fall back to flow=1 (按时间) to capture any additional timeline comments.
+    const flowsToTry: number[] = [];
+    if (config.COMMENT_FLOW === 0) {
+      flowsToTry.push(0); // Hot comments first (much more comments for stars/hot posts)
+      flowsToTry.push(1); // Timeline comments fallback
+    } else {
+      flowsToTry.push(1); // Explicit timeline comments
+    }
 
-      const data = commentsData?.data || [];
-      if (data.length === 0) break;
+    for (const currentFlow of flowsToTry) {
+      if (parsedComments.length >= limit) break;
 
-      for (const rawComment of data) {
-        const parsedComment = parseComment(rawComment, postId);
-        if (!seenCommentIds.has(parsedComment.id)) {
-          seenCommentIds.add(parsedComment.id);
-          parsedComments.push(parsedComment);
-        }
+      let maxId = '0';
+      let keepFetching = true;
 
-        const rawReplies = rawComment.comments || [];
-        for (const rawReply of rawReplies) {
-          const parsedReply = parseComment(rawReply, postId, parsedComment.id);
-          if (!seenCommentIds.has(parsedReply.id)) {
-            seenCommentIds.add(parsedReply.id);
-            parsedComments.push(parsedReply);
-          }
-        }
-
-        const totalNumber = rawComment.total_number || 0;
-        if (totalNumber > rawReplies.length) {
-          spinner.updateText(`正在获取微博 ID: ${postId} 的评论列表: 已获取 ${parsedComments.length} 条 (正在补充楼中楼回复)...`);
-          const fetchedReplies = await this.scrapeSubComments(postId, parsedComment.id, uid);
-          for (const reply of fetchedReplies) {
-            if (!seenCommentIds.has(reply.id)) {
-              seenCommentIds.add(reply.id);
-              parsedComments.push(reply);
-            }
-          }
-        }
-
-        if (parsedComments.length >= limit) {
+      while (keepFetching && parsedComments.length < limit) {
+        let commentsData: any = null;
+        try {
+          const url = `https://weibo.com/ajax/statuses/buildComments?flow=${currentFlow}&is_reload=1&id=${postId}&is_show_bulletin=2&is_mix=0&count=20&uid=${uid}${maxId !== '0' ? `&max_id=${maxId}` : ''}`;
+          const response = await this.makeRequest(url, {
+            method: 'GET',
+            headers: { 'Referer': `https://weibo.com/detail/${postId}` },
+            responseType: 'json'
+          });
+          commentsData = response.data;
+        } catch (err: any) {
+          spinner.stop();
+          logger.error(`获取微博 ${postId} 的评论失败 (flow=${currentFlow}): ${err.message}`);
           break;
         }
-      }
 
-      spinner.updateText(`正在获取微博 ID: ${postId} 的评论列表: 已获取 ${parsedComments.length} 条...`);
+        const data = commentsData?.data || [];
+        if (data.length === 0) {
+          break;
+        }
 
-      maxId = commentsData?.max_id?.toString() || '0';
-      if (maxId === '0' || maxId === '') {
-        keepFetching = false;
-      } else {
-        await new Promise(resolve => setTimeout(resolve, config.REQUEST_DELAY_MIN + Math.random() * (config.REQUEST_DELAY_MAX - config.REQUEST_DELAY_MIN)));
+        for (const rawComment of data) {
+          const parsedComment = parseComment(rawComment, postId);
+          if (!seenCommentIds.has(parsedComment.id)) {
+            seenCommentIds.add(parsedComment.id);
+            parsedComments.push(parsedComment);
+          }
+
+          const rawReplies = rawComment.comments || [];
+          for (const rawReply of rawReplies) {
+            const parsedReply = parseComment(rawReply, postId, parsedComment.id);
+            if (!seenCommentIds.has(parsedReply.id)) {
+              seenCommentIds.add(parsedReply.id);
+              parsedComments.push(parsedReply);
+            }
+          }
+
+          const totalNumber = rawComment.total_number || 0;
+          if (totalNumber > rawReplies.length && parsedComments.length < limit) {
+            spinner.updateText(`正在获取微博 ID: ${postId} 的评论列表: 已获取 ${parsedComments.length} 条 (正在补充楼中楼回复)...`);
+            const maxSubForThisComment = Math.min(
+              config.MAX_SUB_COMMENTS_PER_COMMENT <= 0 ? 100 : config.MAX_SUB_COMMENTS_PER_COMMENT,
+              limit === Infinity ? 100 : Math.max(1, limit - parsedComments.length)
+            );
+            const fetchedReplies = await this.scrapeSubComments(postId, parsedComment.id, uid, maxSubForThisComment);
+            for (const reply of fetchedReplies) {
+              if (!seenCommentIds.has(reply.id)) {
+                seenCommentIds.add(reply.id);
+                parsedComments.push(reply);
+              }
+              if (parsedComments.length >= limit) break;
+            }
+          }
+
+          if (parsedComments.length >= limit) {
+            break;
+          }
+        }
+
+        spinner.updateText(`正在获取微博 ID: ${postId} 的评论列表: 已获取 ${parsedComments.length} 条...`);
+
+        maxId = commentsData?.max_id?.toString() || '0';
+        if (maxId === '0' || maxId === '' || commentsData?.trendsText === '已加载全部评论') {
+          keepFetching = false;
+        } else {
+          await new Promise(resolve => setTimeout(resolve, config.REQUEST_DELAY_MIN + Math.random() * (config.REQUEST_DELAY_MAX - config.REQUEST_DELAY_MIN)));
+        }
       }
     }
 
@@ -767,12 +789,12 @@ export class WeiboScraper {
   /**
    * Scrapes sub-comments
    */
-  private async scrapeSubComments(postId: string, parentCommentId: string, uid: string): Promise<ParsedComment[]> {
+  private async scrapeSubComments(postId: string, parentCommentId: string, uid: string, maxSub = 50): Promise<ParsedComment[]> {
     const subComments: ParsedComment[] = [];
     let maxId = '0';
     let keepFetching = true;
 
-    while (keepFetching && subComments.length < 20) {
+    while (keepFetching && subComments.length < maxSub) {
       let subCommentsData: any = null;
       try {
         const url = `https://weibo.com/ajax/statuses/buildComments?flow=1&is_reload=1&id=${parentCommentId}&is_show_bulletin=2&is_mix=1&fetch_level=1&count=20&uid=${uid}${maxId !== '0' ? `&max_id=${maxId}` : ''}`;
@@ -792,10 +814,11 @@ export class WeiboScraper {
 
       for (const rawSubComment of data) {
         subComments.push(parseComment(rawSubComment, postId, parentCommentId));
+        if (subComments.length >= maxSub) break;
       }
 
       maxId = subCommentsData?.max_id?.toString() || '0';
-      if (maxId === '0' || maxId === '') {
+      if (maxId === '0' || maxId === '' || subCommentsData?.trendsText === '已加载全部评论') {
         keepFetching = false;
       } else {
         await new Promise(resolve => setTimeout(resolve, config.REQUEST_DELAY_MIN + Math.random() * (config.REQUEST_DELAY_MAX - config.REQUEST_DELAY_MIN)));

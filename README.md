@@ -185,16 +185,20 @@ node dist/index.js -d 2026-09-26 -u 1234567890
 - `USER_ID_LIST=userid.txt`：你的博主名单文件，一般默认填 `userid.txt` 即可。
 - `ONLY_ORIGINAL=false`：**是否只抓原创**？如果改成 `true`，博主转发别人的微博就会被直接忽略。
 - `SCRAPE_COMMENTS=true`：**要不要顺便把评论区也抓下来**？不想存评论可以设为 `false`。
-- `MAX_COMMENTS_PER_POST=50`：每条微博最多抓多少条评论？默认 50 条。
+- `MAX_COMMENTS_PER_POST=50`：每条微博最多抓多少条评论？默认 50 条；填 `0` 表示不限数量尽量多抓。
+- `COMMENT_FLOW=0`：**评论排序抓取模式**。`0`=按热度排序（默认推荐，适合绝大多数大V/明星博主，避免因控评/过滤导致只抓到几条评论），`1`=按时间排序。在热度模式下，若未达到抓取上限，系统还会自动衔接时间线补全更多评论。
+- `MAX_SUB_COMMENTS_PER_COMMENT=50`：单条主评论最大抓取的楼中楼（二级回复）数量。
 - `START_DATE` / `END_DATE`：如果你想统一抓某个固定时间段（比如想把 2026 年初到现在的都存一遍），可以在这里填 `2026-01-01`，平时不限制留空即可。
 
-### 2. 图片与视频下载开关
+### 2. 媒体（图片/视频/实况/语音）下载开关
 - `DOWNLOAD_ORIGINAL_IMAGES=true`：原创微博里的大图要不要下载到本地？
 - `DOWNLOAD_ORIGINAL_VIDEOS=true`：原创微博里的视频要不要下载？
 - `DOWNLOAD_ORIGINAL_LIVEPHOTOS=true`：原创微博里的 Live Photo 实况动图要不要下载？
+- `DOWNLOAD_ORIGINAL_AUDIOS=true`：原创微博里的语音/音频文件要不要下载？（会自动提取并在 Markdown 中提供播放器与转写文本）
 - `DOWNLOAD_RETWEET_IMAGES=false`：转发的微博里的图片要不要下载？（默认关，避免占太多硬盘）
 - `DOWNLOAD_RETWEET_VIDEOS=false`：转发微博里的视频要不要下载？
 - `DOWNLOAD_RETWEET_LIVEPHOTOS=false`：转发微博里的实况照片要不要下载？
+- `DOWNLOAD_RETWEET_AUDIOS=false`：转发微博里的语音/音频要不要下载？
 - `DOWNLOAD_COMMENT_MEDIA=false`：评论区里网友附带的表情包/图片要不要下载？
 - `CONCURRENT_DOWNLOADS=10`：同时下载多少个文件？数字越大下载越快，一般 5 到 15 就很合适。
 
