@@ -108,11 +108,12 @@ export class TelegramBot {
       } else if (command === '/status') {
         await this.showStatus();
       } else if (command === '/logout') {
-        if (fs.existsSync(config.STATE_FILE)) {
-          fs.unlinkSync(config.STATE_FILE);
-          await Notifier.sendText("✅ 已成功退出登录。state.json 已被删除。");
+        const stateExists = fs.existsSync(config.STATE_FILE);
+        AuthManager.logout();
+        if (stateExists) {
+          await Notifier.sendText("✅ 已成功退出登录。会话凭证已安全清除。");
         } else {
-          await Notifier.sendText("ℹ️ 已经是退出登录状态。未找到 state.json 文件。");
+          await Notifier.sendText("ℹ️ 已经是退出登录状态。未找到本地会话凭证。");
         }
       } else if (command === '/login') {
         await this.handleLogin();

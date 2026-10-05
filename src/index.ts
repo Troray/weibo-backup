@@ -4,6 +4,7 @@ import { logger } from './utils/logger';
 import { config } from './config';
 import { TelegramBot } from './utils/telegramBot';
 import { Notifier } from './utils/notifier';
+import { sessionManager } from './auth/SessionManager';
 // Register global unhandled rejection & exception handlers to protect daemon process
 process.on('unhandledRejection', (reason, promise) => {
   logger.error('Unhandled Promise Rejection at:', promise, 'reason:', reason);
@@ -36,6 +37,7 @@ async function start() {
   const handleShutdown = async (signal: string) => {
     logger.warn(`收到 ${signal} 信号。正在执行退出...`);
     try {
+      sessionManager.stopKeepAlive();
       TelegramBot.stop();
       await closeDb();
       logger.info('退出完毕，结束进程。');
@@ -160,6 +162,9 @@ async function start() {
 
   // Check if we should run in Telegram Interactive Daemon Mode
   if (config.DAEMON_MODE) {
+    if (config.WEIBO_SESSION_REFRESH_ENABLED) {
+      sessionManager.startKeepAlive();
+    }
     if (config.TELEGRAM_BOT_TOKEN) {
       try {
         await TelegramBot.start();

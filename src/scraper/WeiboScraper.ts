@@ -9,15 +9,12 @@ import { parsePost, parseComment, ParsedPost, ParsedComment, cleanHtmlText } fro
 import { StoragePipeline } from '../storage/StoragePipeline';
 import { getDb } from '../storage/db';
 import { resolveMid } from '../utils/base62';
-import { CookieJar } from '../utils/cookieHelper';
+import { sessionManager } from '../auth/SessionManager';
+import { SessionExpiredError } from '../auth/types';
 import { getAxiosProxyConfig } from '../utils/proxyHelper';
 
-export class SessionExpiredError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'SessionExpiredError';
-  }
-}
+// Re-export for backward compatibility
+export { SessionExpiredError };
 
 function getTodayString(): string {
   const d = new Date();
@@ -107,8 +104,6 @@ class Spinner {
 
 export class WeiboScraper {
   private pipeline: StoragePipeline;
-  private jar = new CookieJar();
-  private jarLoaded = false;
   private requestQueue: CrawlRequest[] = [];
   private screenNameCache = new Map<string, string>();
   private crawledPostsDayCache = new Map<string, Set<string>>();
@@ -147,17 +142,14 @@ export class WeiboScraper {
   }
 
   /**
-   * Helper request builder that attaches Cookies and User-Agent
+   * Helper request builder that attaches Cookies and User-Agent,
+   * delegating session persistence and validation to SessionManager.
    */
   private async makeRequest(url: string, options: any = {}): Promise<any> {
-    if (!this.jarLoaded) {
-      this.jar.load(config.STATE_FILE);
-      this.jarLoaded = true;
-    }
-
     const headers = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Cookie': this.jar.getCookieHeader(url),
+      'Referer': options.headers?.Referer || 'https://weibo.com/',
+      'Cookie': sessionManager.getCookieHeader(url),
       ...(options.headers || {})
     };
 
@@ -168,25 +160,21 @@ export class WeiboScraper {
       headers
     });
 
-    const setCookie = response.headers['set-cookie'];
-    if (setCookie) {
-      this.jar.addCookies(setCookie, url);
-      this.jar.save(config.STATE_FILE);
-    }
+    // Passive session renewal: update Set-Cookie via SessionManager
+    sessionManager.processResponse(response, url);
 
-    // Verify authentication status via redirected URL or HTML content
+    // Verify authentication status via redirected URL or response content
     const finalUrl = response.request?.res?.responseUrl || url;
     const bodyStr = typeof response.data === 'string' ? response.data : '';
-    if (finalUrl.includes('passport.weibo.com') || finalUrl.includes('login.php') || bodyStr.includes('retcode=6102')) {
+    const data = response.data;
+
+    const isLoginRedirect = finalUrl.includes('passport.weibo.com') || finalUrl.includes('login.php');
+    const is6102 = bodyStr.includes('retcode=6102');
+    const isApiUnlogin = data && (data.ok === -100 || (typeof data.url === 'string' && data.url.includes('login.php')));
+
+    if (isLoginRedirect || is6102 || isApiUnlogin) {
       const errMsg = '检测到登录会话过期或被重定向到登录页面。停止爬虫任务。';
       logger.error(errMsg);
-      this.jarLoaded = false;
-      if (fs.existsSync(config.STATE_FILE)) {
-        try {
-          fs.unlinkSync(config.STATE_FILE);
-          logger.warn(`已自动清理失效的会话状态文件 ${config.STATE_FILE}。下一次运行将重新进行扫码鉴权。`);
-        } catch {}
-      }
       throw new SessionExpiredError(errMsg);
     }
 
@@ -303,12 +291,7 @@ export class WeiboScraper {
         } catch (err: any) {
           logger.error(`请求失败 (${attempts}/${maxAttempts}): ${req.url}。错误: ${err.message || err}`);
           if (err instanceof SessionExpiredError || err.message?.includes('检测到登录会话过期')) {
-            logger.error('检测到登录会话已过期，已清除本地凭证并停止当前队列。');
-            if (fs.existsSync(config.STATE_FILE)) {
-              try {
-                fs.unlinkSync(config.STATE_FILE);
-              } catch {}
-            }
+            logger.error('检测到登录会话已过期，停止当前爬取队列。由上层调度统一处理重新鉴权。');
             throw err;
           }
           if (attempts >= maxAttempts) {

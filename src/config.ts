@@ -19,6 +19,8 @@ export interface ScraperConfig {
   LOGIN_MODE: LoginMode; // 登录模式：TERMINAL_QR（终端二维码）、BOT_NOTIFY（机器人通知二维码）、LOCAL_SYNC（本地同步）
   HEADLESS: boolean; // [已弃用] 模拟登录已切换为纯 API 浏览器级模拟登录，此选项不再生效
   STATE_FILE: string; // state.json 存储路径
+  WEIBO_SESSION_REFRESH_ENABLED: boolean; // 是否启用定期 Session 自动续期心跳
+  WEIBO_SESSION_REFRESH_INTERVAL: number; // 守护模式下自动续期检查间隔（毫秒，默认 12 小时）
   
   // 机器人通知配置（以 Telegram 为例，可根据需要扩展）
   TELEGRAM_BOT_TOKEN?: string;
@@ -102,6 +104,22 @@ export const config: ScraperConfig = {
   LOGIN_MODE: (getEnvStr('LOGIN_MODE', 'TERMINAL_QR') as LoginMode),
   HEADLESS: getEnvBool('HEADLESS', true),
   STATE_FILE: getEnvStr('STATE_FILE') || path.join(process.cwd(), 'state.json'),
+  WEIBO_SESSION_REFRESH_ENABLED: getEnvBool('WEIBO_SESSION_REFRESH_ENABLED', true),
+  WEIBO_SESSION_REFRESH_INTERVAL: (() => {
+    const raw = getEnvStr('WEIBO_SESSION_REFRESH_INTERVAL');
+    if (!raw) return 12 * 60 * 60 * 1000;
+    const match = raw.trim().match(/^(\d+(?:\.\d+)?)\s*(h|m|s|ms)?$/i);
+    if (match) {
+      const val = parseFloat(match[1]);
+      const unit = (match[2] || 'h').toLowerCase();
+      if (unit === 'h') return Math.floor(val * 3600 * 1000);
+      if (unit === 'm') return Math.floor(val * 60 * 1000);
+      if (unit === 's') return Math.floor(val * 1000);
+      if (unit === 'ms') return Math.floor(val);
+    }
+    const num = parseInt(raw, 10);
+    return isNaN(num) ? 12 * 60 * 60 * 1000 : num;
+  })(),
   
   TELEGRAM_BOT_TOKEN: getEnvStr('TELEGRAM_BOT_TOKEN'),
   TELEGRAM_CHAT_ID: getEnvStr('TELEGRAM_CHAT_ID'),

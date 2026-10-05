@@ -7,10 +7,73 @@ export interface WeiboCookie {
   value: string;
   domain: string;
   path: string;
-  expires: number; // Unix timestamp in seconds
+  expires: number | null; // Unix timestamp in seconds, or null for Session Cookie
   httpOnly: boolean;
   secure: boolean;
   sameSite: 'Lax' | 'Strict' | 'None';
+  hostOnly?: boolean;
+}
+
+/**
+ * Checks whether cookie path matches request path according to RFC 6265.
+ */
+export function pathMatches(requestPath: string, cookiePath: string): boolean {
+  let req = requestPath || '/';
+  let cookie = cookiePath || '/';
+
+  if (!req.startsWith('/')) req = '/' + req;
+  if (!cookie.startsWith('/')) cookie = '/' + cookie;
+
+  if (req === cookie) {
+    return true;
+  }
+
+  if (req.startsWith(cookie)) {
+    if (cookie.endsWith('/')) {
+      return true;
+    }
+    if (req.charAt(cookie.length) === '/') {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Checks whether request hostname matches cookie domain according to RFC 6265.
+ */
+export function domainMatches(hostname: string, cookieDomain: string, hostOnly: boolean): boolean {
+  const host = hostname.toLowerCase();
+  let cd = cookieDomain.toLowerCase();
+
+  if (cd.startsWith('.')) {
+    cd = cd.substring(1);
+  }
+
+  if (hostOnly) {
+    return host === cd;
+  }
+
+  if (host === cd) {
+    return true;
+  }
+
+  if (host.endsWith('.' + cd)) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Checks if a cookie is expired. Session cookies (expires === null) are never expired locally.
+ */
+export function isCookieExpired(cookie: WeiboCookie, nowSec: number = Math.floor(Date.now() / 1000)): boolean {
+  if (cookie.expires === null || cookie.expires === undefined) {
+    return false; // Session cookie is valid for the lifetime of session
+  }
+  return typeof cookie.expires === 'number' && cookie.expires > 0 && cookie.expires <= nowSec;
 }
 
 export class CookieJar {
@@ -30,7 +93,18 @@ export class CookieJar {
     try {
       const content = fs.readFileSync(stateFilePath, 'utf8');
       const parsed = JSON.parse(content);
-      this.cookies = parsed.cookies || [];
+      const rawCookies: any[] = parsed.cookies || [];
+      this.cookies = rawCookies.map(c => ({
+        name: String(c.name || ''),
+        value: String(c.value || ''),
+        domain: String(c.domain || ''),
+        path: String(c.path || '/'),
+        expires: typeof c.expires === 'number' ? c.expires : null,
+        httpOnly: Boolean(c.httpOnly),
+        secure: Boolean(c.secure),
+        sameSite: (c.sameSite === 'Strict' || c.sameSite === 'None') ? c.sameSite : 'Lax',
+        hostOnly: c.hostOnly !== undefined ? Boolean(c.hostOnly) : (!String(c.domain || '').startsWith('.'))
+      })).filter(c => c.name.length > 0);
     } catch (err: any) {
       logger.error(`读取 state.json 失败: ${err.message}`);
       this.cookies = [];
@@ -65,11 +139,14 @@ export class CookieJar {
 
     const url = new URL(requestUrl);
     let domain = url.hostname;
+    let hostOnly = true;
     let path = '/';
-    let expires = Math.floor(Date.now() / 1000) + 365 * 24 * 3600; // default 1 year
+    let expires: number | null = null; // Session cookie by default (RFC 6265)
     let httpOnly = false;
     let secure = false;
     let sameSite: 'Lax' | 'Strict' | 'None' = 'Lax';
+
+    let maxAgeParsed = false;
 
     for (let i = 1; i < parts.length; i++) {
       const part = parts[i];
@@ -79,17 +156,19 @@ export class CookieJar {
 
       if (key === 'domain') {
         domain = val;
+        hostOnly = false;
       } else if (key === 'path') {
-        path = val;
-      } else if (key === 'expires') {
-        const parsedEpoch = Date.parse(val);
-        if (!isNaN(parsedEpoch)) {
-          expires = Math.floor(parsedEpoch / 1000);
-        }
+        path = val.startsWith('/') ? val : '/' + val;
       } else if (key === 'max-age') {
         const maxAge = parseInt(val, 10);
         if (!isNaN(maxAge)) {
           expires = Math.floor(Date.now() / 1000) + maxAge;
+          maxAgeParsed = true;
+        }
+      } else if (key === 'expires' && !maxAgeParsed) {
+        const parsedEpoch = Date.parse(val);
+        if (!isNaN(parsedEpoch)) {
+          expires = Math.floor(parsedEpoch / 1000);
         }
       } else if (key === 'httponly') {
         httpOnly = true;
@@ -104,10 +183,14 @@ export class CookieJar {
     }
 
     // Normalise domain
-    if (domain.startsWith('.')) {
-      // already wildcard domain
-    } else if (domain !== url.hostname) {
-      domain = '.' + domain;
+    if (!hostOnly) {
+      if (!domain.startsWith('.')) {
+        domain = '.' + domain.toLowerCase();
+      } else {
+        domain = domain.toLowerCase();
+      }
+    } else {
+      domain = domain.toLowerCase();
     }
 
     const newCookie: WeiboCookie = {
@@ -118,7 +201,8 @@ export class CookieJar {
       expires,
       httpOnly,
       secure,
-      sameSite
+      sameSite,
+      hostOnly
     };
 
     // Upsert cookie in jar (match by name, domain, path)
@@ -132,30 +216,47 @@ export class CookieJar {
     }
   }
 
-  addCookies(setCookieHeaders: string[] | string | undefined, requestUrl: string): void {
-    if (!setCookieHeaders) return;
+  addCookies(setCookieHeaders: string[] | string | undefined, requestUrl: string): number {
+    if (!setCookieHeaders) return 0;
     const headers = Array.isArray(setCookieHeaders) ? setCookieHeaders : [setCookieHeaders];
+    let count = 0;
     for (const header of headers) {
-      this.addCookie(header, requestUrl);
+      if (header && typeof header === 'string') {
+        this.addCookie(header, requestUrl);
+        count++;
+      }
     }
+    return count;
   }
 
   getCookieHeader(targetUrl: string): string {
     const url = new URL(targetUrl);
     const hostname = url.hostname.toLowerCase();
+    const reqPath = url.pathname || '/';
+    const isHttps = url.protocol === 'https:';
     const nowSec = Math.floor(Date.now() / 1000);
 
-    // Filter expired cookies
-    this.cookies = this.cookies.filter(c => c.expires > nowSec);
+    // Filter out truly expired cookies (keep session cookies where expires is null)
+    this.cookies = this.cookies.filter(c => !isCookieExpired(c, nowSec));
 
     const matched = this.cookies.filter(c => {
-      const cookieDomain = c.domain.toLowerCase();
-      if (cookieDomain === hostname) return true;
-      if (cookieDomain.startsWith('.')) {
-        const baseDomain = cookieDomain.substring(1);
-        return hostname === baseDomain || hostname.endsWith('.' + baseDomain);
+      // 1. Secure check: secure cookies should only be sent over https
+      if (c.secure && !isHttps) {
+        return false;
       }
-      return false;
+
+      // 2. Domain check
+      const hostOnly = c.hostOnly ?? (!c.domain.startsWith('.'));
+      if (!domainMatches(hostname, c.domain, hostOnly)) {
+        return false;
+      }
+
+      // 3. Path check
+      if (!pathMatches(reqPath, c.path || '/')) {
+        return false;
+      }
+
+      return true;
     });
 
     return matched.map(c => `${c.name}=${c.value}`).join('; ');
@@ -163,7 +264,15 @@ export class CookieJar {
 
   getCookies(): WeiboCookie[] {
     const nowSec = Math.floor(Date.now() / 1000);
-    this.cookies = this.cookies.filter(c => c.expires > nowSec);
-    return this.cookies;
+    this.cookies = this.cookies.filter(c => !isCookieExpired(c, nowSec));
+    return [...this.cookies];
+  }
+
+  setCookies(cookies: WeiboCookie[]): void {
+    this.cookies = [...cookies];
+  }
+
+  clear(): void {
+    this.cookies = [];
   }
 }
