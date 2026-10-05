@@ -12,40 +12,40 @@ import { resolveMid } from '../utils/base62';
 import { sessionManager } from '../auth/SessionManager';
 import { SessionExpiredError } from '../auth/types';
 import { getAxiosProxyConfig } from '../utils/proxyHelper';
+import { readUsers, writeUsers } from '../utils/userFileHelper';
 
 // Re-export for backward compatibility
 export { SessionExpiredError };
 
-function getTodayString(): string {
-  const d = new Date();
-  const beijingMs = d.getTime() + 8 * 3600 * 1000;
-  const beijingDate = new Date(beijingMs);
+function getBeijingDateParts(input: Date | number) {
+  const ts = typeof input === 'number' ? input : input.getTime();
+  const beijingDate = new Date(ts + 8 * 3600 * 1000);
   const pad = (n: number) => String(n).padStart(2, '0');
   const year = beijingDate.getUTCFullYear();
   const month = pad(beijingDate.getUTCMonth() + 1);
   const day = pad(beijingDate.getUTCDate());
-  return `${year}-${month}-${day}`;
+  const hours = pad(beijingDate.getUTCHours());
+  const minutes = pad(beijingDate.getUTCMinutes());
+  const seconds = pad(beijingDate.getUTCSeconds());
+  return {
+    year,
+    month,
+    day,
+    hours,
+    minutes,
+    seconds,
+    dateStr: `${year}-${month}-${day}`,
+    minuteStr: `${year}-${month}-${day} ${hours}:${minutes}`,
+    isoStr: `${year}-${month}-${day}T${hours}:${minutes}:${seconds}`
+  };
+}
+
+function getTodayString(): string {
+  return getBeijingDateParts(Date.now()).dateStr;
 }
 
 function formatToMinute(input: Date | number): string {
-  const d = typeof input === 'number' ? new Date(input) : input;
-  try {
-    const formatter = new Intl.DateTimeFormat('zh-CN', {
-      timeZone: 'Asia/Shanghai',
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false
-    });
-    const parts = formatter.formatToParts(d);
-    const getPart = (t: string) => parts.find(p => p.type === t)?.value || '';
-    return `${getPart('year')}-${getPart('month')}-${getPart('day')} ${getPart('hour')}:${getPart('minute')}`;
-  } catch {
-    const pad = (n: number) => String(n).padStart(2, '0');
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  }
+  return getBeijingDateParts(input).minuteStr;
 }
 
 function parseCursorToTimestamp(str: string): number {
@@ -175,7 +175,6 @@ export class WeiboScraper {
 
   private getBloggerName(uid: string): string {
     try {
-      const { readUsers } = require('../utils/userFileHelper');
       const users = readUsers();
       const match = users.find((u: any) => u.uid === uid);
       if (match?.name) return match.name;
@@ -237,8 +236,8 @@ export class WeiboScraper {
     let uids: string[] = [];
     const list = config.USER_ID_LIST.trim();
     if (list.toLowerCase().endsWith('.txt')) {
-      const filePath = this.getCursorFilePath();
-      uids = this.loadUidsFromCursorFile(filePath);
+      const users = readUsers();
+      uids = users.filter((u: any) => !u.isCommented && u.uid).map((u: any) => u.uid!);
     } else {
       uids = list.split(',').map(s => s.trim()).filter(Boolean);
     }
@@ -269,12 +268,9 @@ export class WeiboScraper {
       const effectiveEndDate = config.END_DATE || todayStr;
 
       if (cursor > 0) {
-        startDateTimeStr = formatToMinute(cursor);
-        const date = new Date(cursor);
-        const y = date.getFullYear();
-        const m = String(date.getMonth() + 1).padStart(2, '0');
-        const d = String(date.getDate()).padStart(2, '0');
-        startDateStr = `${y}-${m}-${d}`;
+        const bp = getBeijingDateParts(cursor);
+        startDateTimeStr = bp.minuteStr;
+        startDateStr = bp.dateStr;
       } else if (config.START_DATE) {
         startDateStr = config.START_DATE;
         startDateTimeStr = `${config.START_DATE} 00:00`;
@@ -961,33 +957,8 @@ export class WeiboScraper {
 
   // --- Cursor Management (Incremental Sync) ---
 
-  private getCursorFilePath(): string {
-    const list = config.USER_ID_LIST.trim();
-    if (list.toLowerCase().endsWith('.txt')) {
-      return path.isAbsolute(list) ? list : path.join(process.cwd(), list);
-    }
-    return path.join(process.cwd(), 'userid.txt');
-  }
-
-  private loadUidsFromCursorFile(filePath: string): string[] {
-    if (!fs.existsSync(filePath)) {
-      return [];
-    }
-    try {
-      const content = fs.readFileSync(filePath, 'utf8');
-      return content.split('\n')
-        .map(line => line.trim())
-        .filter(line => line && !line.startsWith('#'))
-        .map(line => line.split('|')[0].trim());
-    } catch (err) {
-      logger.error(`Failed to read cursor file: ${filePath}`, err);
-      return [];
-    }
-  }
-
   private getCursorForUser(uid: string): number {
     try {
-      const { readUsers } = require('../utils/userFileHelper');
       const users = readUsers();
       const match = users.find((u: any) => u.uid === uid && !u.isCommented);
       if (match?.cursor) {
@@ -1007,20 +978,7 @@ export class WeiboScraper {
         return;
       }
 
-      const formatLocalISOString = (ts: number): string => {
-        const date = new Date(ts);
-        const pad = (n: number) => String(n).padStart(2, '0');
-        const year = date.getFullYear();
-        const month = pad(date.getMonth() + 1);
-        const day = pad(date.getDate());
-        const hours = pad(date.getHours());
-        const minutes = pad(date.getMinutes());
-        const seconds = pad(date.getSeconds());
-        return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}`;
-      };
-
-      const dateStr = formatLocalISOString(timestamp);
-      const { readUsers, writeUsers } = require('../utils/userFileHelper');
+      const dateStr = getBeijingDateParts(timestamp).isoStr;
       const users = readUsers();
       const user = users.find((u: any) => u.uid === uid);
       if (user) {
@@ -1041,7 +999,6 @@ export class WeiboScraper {
 
   private saveBloggerNameToUserFile(uid: string, name: string): void {
     try {
-      const { readUsers, writeUsers } = require('../utils/userFileHelper');
       const users = readUsers();
       const user = users.find((u: any) => u.uid === uid);
       if (user) {

@@ -102,20 +102,32 @@ export function writeUsers(entries: UserEntry[]): void {
         return entry.rawLine;
       }
       const prefix = entry.isCommented ? '#' : '';
-      const parts = [
-        `${prefix}${entry.uid}`,
-        entry.name || '',
-        entry.cursor || ''
-      ];
-      // Trim empty trailing parts to keep format clean
-      while (parts.length > 1 && !parts[parts.length - 1]) {
-        parts.pop();
+      let parts: string[];
+      if (!entry.name && entry.cursor) {
+        // Omit empty name column to keep clean 'UID | cursor' format
+        parts = [`${prefix}${entry.uid}`, entry.cursor];
+      } else {
+        parts = [
+          `${prefix}${entry.uid}`,
+          entry.name || '',
+          entry.cursor || ''
+        ];
+        // Trim empty trailing parts to keep format clean
+        while (parts.length > 1 && !parts[parts.length - 1]) {
+          parts.pop();
+        }
       }
       return parts.join(' | ');
     });
     
-    // Ensure final newline or keep as is
-    fs.writeFileSync(filePath, lines.join('\n'), 'utf8');
+    const tmpPath = `${filePath}.tmp`;
+    fs.writeFileSync(tmpPath, lines.join('\n'), 'utf8');
+    try {
+      fs.renameSync(tmpPath, filePath);
+    } catch {
+      fs.copyFileSync(tmpPath, filePath);
+      fs.unlinkSync(tmpPath);
+    }
   } catch (err) {
     logger.error(`Failed to write user file: ${filePath}`, err);
   }

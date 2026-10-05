@@ -116,7 +116,15 @@ export class SessionManager {
         origins: []
       };
 
-      fs.writeFileSync(stateFilePath, JSON.stringify(state, null, 2), 'utf8');
+      const tmpPath = `${stateFilePath}.tmp`;
+      fs.writeFileSync(tmpPath, JSON.stringify(state, null, 2), 'utf8');
+      try {
+        fs.renameSync(tmpPath, stateFilePath);
+      } catch {
+        // Fallback for Windows cross-device or file locking: copy and unlink
+        fs.copyFileSync(tmpPath, stateFilePath);
+        fs.unlinkSync(tmpPath);
+      }
       logger.debug(`[Auth] 会话状态已安全落盘至 ${stateFilePath}`);
     } catch (err: any) {
       logger.error(`[Auth] 保存会话状态文件失败: ${err.message}`);

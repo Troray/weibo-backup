@@ -73,7 +73,7 @@ export function isCookieExpired(cookie: WeiboCookie, nowSec: number = Math.floor
   if (cookie.expires === null || cookie.expires === undefined) {
     return false; // Session cookie is valid for the lifetime of session
   }
-  return typeof cookie.expires === 'number' && cookie.expires > 0 && cookie.expires <= nowSec;
+  return typeof cookie.expires === 'number' && cookie.expires <= nowSec;
 }
 
 export class CookieJar {
