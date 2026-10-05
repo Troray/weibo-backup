@@ -27,6 +27,27 @@ function getTodayString(): string {
   return `${year}-${month}-${day}`;
 }
 
+function formatToMinute(input: Date | number): string {
+  const d = typeof input === 'number' ? new Date(input) : input;
+  try {
+    const formatter = new Intl.DateTimeFormat('zh-CN', {
+      timeZone: 'Asia/Shanghai',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    });
+    const parts = formatter.formatToParts(d);
+    const getPart = (t: string) => parts.find(p => p.type === t)?.value || '';
+    return `${getPart('year')}-${getPart('month')}-${getPart('day')} ${getPart('hour')}:${getPart('minute')}`;
+  } catch {
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+}
+
 function getDateRange(startDate: string, endDate: string, order: 'asc' | 'desc'): string[] {
   const days: string[] = [];
   const start = new Date(startDate + 'T00:00:00');
@@ -221,21 +242,38 @@ export class WeiboScraper {
 
     for (const uid of uids) {
       const cursor = this.getCursorForUser(uid);
+      const bloggerName = this.getBloggerName(uid) || uid;
 
       let startDateStr = config.START_DATE;
+      let startDateTimeStr = '';
+      let endDateTimeStr = '';
+
+      const now = new Date();
+      const currentNowStr = formatToMinute(now);
+      const todayStr = getTodayString();
+      const effectiveEndDate = config.END_DATE || todayStr;
+
       if (cursor > 0) {
+        startDateTimeStr = formatToMinute(cursor);
         const date = new Date(cursor);
         const y = date.getFullYear();
         const m = String(date.getMonth() + 1).padStart(2, '0');
         const d = String(date.getDate()).padStart(2, '0');
         startDateStr = `${y}-${m}-${d}`;
+      } else if (config.START_DATE) {
+        startDateStr = config.START_DATE;
+        startDateTimeStr = `${config.START_DATE} 00:00`;
       }
 
-      const bloggerName = this.getBloggerName(uid) || uid;
-      let dateRangeStr = '主页 Feed 模式';
-      if (startDateStr) {
-        const effectiveEndDate = config.END_DATE || getTodayString();
-        dateRangeStr = `${startDateStr} 至 ${effectiveEndDate}`;
+      if (config.END_DATE && config.END_DATE !== todayStr) {
+        endDateTimeStr = `${config.END_DATE} 23:59`;
+      } else {
+        endDateTimeStr = currentNowStr;
+      }
+
+      let dateRangeStr = `主页 Feed 模式 (截至 ${currentNowStr})`;
+      if (startDateTimeStr) {
+        dateRangeStr = `${startDateTimeStr} 至 ${endDateTimeStr}`;
       }
 
       this.activeStats.set(uid, {
