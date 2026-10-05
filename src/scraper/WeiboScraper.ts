@@ -249,12 +249,6 @@ export class WeiboScraper {
       return errMsg;
     }
 
-    const uidNames = uids.map(uid => {
-      const name = this.getBloggerName(uid);
-      return name ? `${name} (${uid})` : uid;
-    });
-    logger.info(`正在启动针对博主列表的抓取: ${uidNames.join(', ')}`);
-
     this.activeStats.clear();
     const startTime = Date.now();
 
@@ -263,7 +257,7 @@ export class WeiboScraper {
 
     for (const uid of uids) {
       const cursor = this.getCursorForUser(uid);
-      const bloggerName = this.getBloggerName(uid) || uid;
+      const bloggerName = (await this.getScreenName(uid)) || uid;
 
       let startDateStr = config.START_DATE;
       let startDateTimeStr = '';
@@ -377,7 +371,11 @@ export class WeiboScraper {
     let totalComments = 0;
     
     for (const [uid, stats] of this.activeStats.entries()) {
-      msg += `👤 博主: ${stats.name} (${uid})\n`;
+      const realName = this.screenNameCache.get(uid) || this.getBloggerName(uid) || stats.name;
+      const displayName = (realName && realName !== uid && !realName.startsWith('user_'))
+        ? `${realName} (${uid})`
+        : uid;
+      msg += `👤 博主: ${displayName}\n`;
       msg += `📅 区间: ${stats.dateRange}\n`;
       msg += `📥 新增微博: ${stats.postsCount} 条\n`;
       if (config.SCRAPE_COMMENTS) {
@@ -411,6 +409,10 @@ export class WeiboScraper {
   private async handleProfilePage(userData: any): Promise<void> {
     const { uid, cursor } = userData;
     const screenName = await this.getScreenName(uid);
+    const stats = this.activeStats.get(uid);
+    if (stats && screenName && screenName !== `user_${uid}`) {
+      stats.name = screenName;
+    }
     const displayName = `${screenName} (${uid})`;
     logger.info(`正在抓取 ${displayName} 的主页 Feed`);
 
@@ -584,6 +586,10 @@ export class WeiboScraper {
 
     // Get user profile screen name (cached per UID)
     const screenName = await this.getScreenName(uid);
+    const stats = this.activeStats.get(uid);
+    if (stats && screenName && screenName !== `user_${uid}`) {
+      stats.name = screenName;
+    }
 
     let latestPostTimestamp = 0;
 
@@ -617,6 +623,19 @@ export class WeiboScraper {
         }
 
         const postTime = new Date(parsedPost.time).getTime();
+
+        const postAuthorName = postData?.user?.screen_name;
+        if (postAuthorName) {
+          const cached = this.screenNameCache.get(uid);
+          if (!cached || cached === uid || cached.startsWith('user_')) {
+            this.screenNameCache.set(uid, postAuthorName);
+            this.saveBloggerNameToUserFile(uid, postAuthorName);
+          }
+          const s = this.activeStats.get(uid);
+          if (s && (!s.name || s.name === uid || s.name.startsWith('user_'))) {
+            s.name = postAuthorName;
+          }
+        }
 
         // Verify date ranges
         const targetStartDate = actualStartDate || config.START_DATE;
