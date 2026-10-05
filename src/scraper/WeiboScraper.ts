@@ -48,6 +48,27 @@ function formatToMinute(input: Date | number): string {
   }
 }
 
+function parseCursorToTimestamp(str: string): number {
+  const trimmed = str.trim();
+  if (!trimmed) return 0;
+  if (/^\d{10,13}$/.test(trimmed)) {
+    const num = parseInt(trimmed, 10);
+    return trimmed.length === 10 ? num * 1000 : num;
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    const ts = Date.parse(`${trimmed}T00:00:00+08:00`);
+    if (!isNaN(ts)) return ts;
+  }
+  if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$/.test(trimmed)) {
+    const iso = trimmed.replace(' ', 'T');
+    const fullIso = iso.split(':').length === 2 ? `${iso}:00` : iso;
+    const ts = Date.parse(`${fullIso}+08:00`);
+    if (!isNaN(ts)) return ts;
+  }
+  const fallback = Date.parse(trimmed);
+  return isNaN(fallback) ? 0 : fallback;
+}
+
 function getDateRange(startDate: string, endDate: string, order: 'asc' | 'desc'): string[] {
   const days: string[] = [];
   const start = new Date(startDate + 'T00:00:00');
@@ -946,24 +967,12 @@ export class WeiboScraper {
   }
 
   private getCursorForUser(uid: string): number {
-    const filePath = this.getCursorFilePath();
-    if (!fs.existsSync(filePath)) {
-      return 0;
-    }
     try {
-      const content = fs.readFileSync(filePath, 'utf8');
-      const lines = content.split('\n');
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith('#')) continue;
-        const parts = trimmed.split('|');
-        if (parts[0].trim() === uid) {
-          const tsStr = parts[2]?.trim();
-          if (tsStr) {
-            const ts = /^\d+$/.test(tsStr) ? parseInt(tsStr, 10) : Date.parse(tsStr);
-            return isNaN(ts) ? 0 : ts;
-          }
-        }
+      const { readUsers } = require('../utils/userFileHelper');
+      const users = readUsers();
+      const match = users.find((u: any) => u.uid === uid && !u.isCommented);
+      if (match?.cursor) {
+        return parseCursorToTimestamp(match.cursor);
       }
     } catch (err) {
       logger.error(`Error reading cursor for UID ${uid}`, err);
@@ -992,31 +1001,20 @@ export class WeiboScraper {
       };
 
       const dateStr = formatLocalISOString(timestamp);
-      const filePath = this.getCursorFilePath();
-      let content = '';
-      if (fs.existsSync(filePath)) {
-        content = fs.readFileSync(filePath, 'utf8');
-      }
-
-      const lines = content.split('\n');
-      let found = false;
-      const updatedLines = lines.map(line => {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith('#')) return line;
-        const parts = trimmed.split('|');
-        if (parts[0].trim() === uid) {
-          found = true;
-          return `${uid} | ${name} | ${dateStr}`;
+      const { readUsers, writeUsers } = require('../utils/userFileHelper');
+      const users = readUsers();
+      const user = users.find((u: any) => u.uid === uid);
+      if (user) {
+        user.cursor = dateStr;
+        if (name && !user.name) {
+          user.name = name;
         }
-        return line;
-      });
-
-      if (!found) {
-        updatedLines.push(`${uid} | ${name} | ${dateStr}`);
+        writeUsers(users);
+      } else {
+        users.push({ uid, name, cursor: dateStr, isCommented: false });
+        writeUsers(users);
       }
-
-      fs.writeFileSync(filePath, updatedLines.join('\n'), 'utf8');
-      logger.info(`Updated cursor file for ${name} (${uid}) to date ${dateStr} (timestamp: ${timestamp})`);
+      logger.info(`Updated cursor file for ${name || uid} (${uid}) to date ${dateStr} (timestamp: ${timestamp})`);
     } catch (err) {
       logger.error(`Failed to update cursor for UID ${uid}`, err);
     }
@@ -1024,22 +1022,14 @@ export class WeiboScraper {
 
   private saveBloggerNameToUserFile(uid: string, name: string): void {
     try {
-      const filePath = this.getCursorFilePath();
-      if (!fs.existsSync(filePath)) return;
-      const content = fs.readFileSync(filePath, 'utf8');
-      const lines = content.split('\n');
-      const updatedLines = lines.map(line => {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith('#')) return line;
-        const parts = trimmed.split('|');
-        if (parts[0].trim() === uid) {
-          const cursor = parts[2]?.trim() || '';
-          return cursor ? `${uid} | ${name} | ${cursor}` : `${uid} | ${name}`;
-        }
-        return line;
-      });
-      fs.writeFileSync(filePath, updatedLines.join('\n'), 'utf8');
-      logger.info(`已成功将博主 ${name} (${uid}) 的昵称持久化保存至 ${filePath}`);
+      const { readUsers, writeUsers } = require('../utils/userFileHelper');
+      const users = readUsers();
+      const user = users.find((u: any) => u.uid === uid);
+      if (user) {
+        user.name = name;
+        writeUsers(users);
+        logger.info(`已成功将博主 ${name} (${uid}) 的昵称持久化保存至用户文件`);
+      }
     } catch (err) {
       logger.error(`保存博主昵称至用户文件失败:`, err);
     }
