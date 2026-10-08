@@ -171,3 +171,11 @@ export const config: ScraperConfig = {
   })(),
   DB_URI: getEnvStr('DB_URI') || path.join(process.cwd(), 'weibo.sqlite'),
 };
+
+export function getMediaDownloadSummary(): string {
+  const img = config.DOWNLOAD_ORIGINAL_IMAGES || config.DOWNLOAD_RETWEET_IMAGES ? '✓' : '✗';
+  const vid = config.DOWNLOAD_ORIGINAL_VIDEOS || config.DOWNLOAD_RETWEET_VIDEOS ? '✓' : '✗';
+  const live = config.DOWNLOAD_ORIGINAL_LIVEPHOTOS || config.DOWNLOAD_RETWEET_LIVEPHOTOS ? '✓' : '✗';
+  const aud = config.DOWNLOAD_ORIGINAL_AUDIOS || config.DOWNLOAD_RETWEET_AUDIOS ? '✓' : '✗';
+  return `图[${img}] 视[${vid}] 实况[${live}] 音[${aud}]`;
+}

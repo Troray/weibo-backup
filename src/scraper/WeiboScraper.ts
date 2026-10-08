@@ -123,10 +123,20 @@ class Spinner {
     }, 80);
   }
 
+  private lastLogTime = 0;
+
   updateText(text: string) {
     this.text = text;
-    if (process.stdout.isTTY && !this.timer) {
-      process.stdout.write(`\r${this.text}`);
+    if (process.stdout.isTTY) {
+      if (!this.timer) {
+        process.stdout.write(`\r${this.text}`);
+      }
+    } else {
+      const now = Date.now();
+      if (now - this.lastLogTime >= 5000) {
+        this.lastLogTime = now;
+        logger.info(this.text);
+      }
     }
   }
 
@@ -144,21 +154,87 @@ class Spinner {
   }
 }
 
+export interface CrawlPostSummary {
+  id: string;
+  time: string;
+  snippet: string;
+  commentsCount: number;
+  mediaCount: number;
+  isRetweet: boolean;
+}
+
+export interface CrawlStatsEntry {
+  name: string;
+  postsCount: number;
+  originalCount: number;
+  retweetCount: number;
+  commentsCount: number;
+  rootCommentsCount: number;
+  subCommentsCount: number;
+  imagesCount: number;
+  videosCount: number;
+  livePhotosCount: number;
+  audiosCount: number;
+  dateRange: string;
+  errors: string[];
+  postSummaries: CrawlPostSummary[];
+}
+
 export class WeiboScraper {
   private pipeline: StoragePipeline;
   private requestQueue: CrawlRequest[] = [];
   private screenNameCache = new Map<string, string>();
   private crawledPostsDayCache = new Map<string, Set<string>>();
-  private activeStats = new Map<string, {
-    name: string;
-    postsCount: number;
-    commentsCount: number;
-    dateRange: string;
-    errors: string[];
-  }>();
+  private activeStats = new Map<string, CrawlStatsEntry>();
 
   constructor() {
     this.pipeline = new StoragePipeline();
+  }
+
+  private updatePostStats(uid: string, post: ParsedPost, comments: ParsedComment[]): void {
+    const stats = this.activeStats.get(uid);
+    if (!stats) return;
+
+    stats.postsCount++;
+    if (post.is_retweet) {
+      stats.retweetCount++;
+    } else {
+      stats.originalCount++;
+    }
+
+    stats.commentsCount += comments.length;
+    stats.rootCommentsCount += comments.filter(c => !c.parent_id).length;
+    stats.subCommentsCount += comments.filter(c => !!c.parent_id).length;
+
+    const imgCount = post.local_images?.length || 0;
+    const vidCount = post.local_videos?.length || 0;
+    const liveCount = post.local_livephotos?.length || 0;
+    const audCount = post.local_audios?.length || 0;
+
+    stats.imagesCount += imgCount;
+    stats.videosCount += vidCount;
+    stats.livePhotosCount += liveCount;
+    stats.audiosCount += audCount;
+
+    const snippet = post.content ? post.content.replace(/\s+/g, ' ').trim().slice(0, 45) : '';
+    stats.postSummaries.push({
+      id: post.id,
+      time: post.time ? (post.time.split(' ')[1] || post.time) : '',
+      snippet,
+      commentsCount: comments.length,
+      mediaCount: imgCount + vidCount + liveCount + audCount,
+      isRetweet: !!post.is_retweet
+    });
+  }
+
+  private formatDuration(durationMs: number): string {
+    const sec = (durationMs / 1000).toFixed(1);
+    if (durationMs < 60000) {
+      return `${sec} 秒`;
+    }
+    const mins = Math.floor(durationMs / 60000);
+    const remainSec = Math.round((durationMs % 60000) / 1000);
+    return `${mins} 分 ${remainSec} 秒 (${sec}s)`;
   }
 
   private getDayCacheKey(uid: string, dateStr: string): string {
@@ -290,9 +366,18 @@ export class WeiboScraper {
       this.activeStats.set(uid, {
         name: bloggerName,
         postsCount: 0,
+        originalCount: 0,
+        retweetCount: 0,
         commentsCount: 0,
+        rootCommentsCount: 0,
+        subCommentsCount: 0,
+        imagesCount: 0,
+        videosCount: 0,
+        livePhotosCount: 0,
+        audiosCount: 0,
         dateRange: dateRangeStr,
-        errors: []
+        errors: [],
+        postSummaries: []
       });
 
       if (startDateStr) {
@@ -362,9 +447,14 @@ export class WeiboScraper {
   }
 
   private generateSummaryMessage(durationSec: string): string {
-    let msg = "🤖 微博爬虫增量同步运行报告\n\n";
+    let msg = "🤖 【微博爬虫增量同步运行报告】\n\n";
     let totalPosts = 0;
+    let totalOriginal = 0;
+    let totalRetweet = 0;
     let totalComments = 0;
+    let totalRootComments = 0;
+    let totalSubComments = 0;
+    let totalMedia = 0;
     
     for (const [uid, stats] of this.activeStats.entries()) {
       const realName = this.screenNameCache.get(uid) || this.getBloggerName(uid) || stats.name;
@@ -373,9 +463,21 @@ export class WeiboScraper {
         : uid;
       msg += `👤 博主: ${displayName}\n`;
       msg += `📅 区间: ${stats.dateRange}\n`;
-      msg += `📥 新增微博: ${stats.postsCount} 条\n`;
+      msg += `📥 新增微博: ${stats.postsCount} 条 (原创: ${stats.originalCount} | 转发: ${stats.retweetCount})\n`;
       if (config.SCRAPE_COMMENTS) {
-        msg += `💬 抓取评论: ${stats.commentsCount} 条\n`;
+        msg += `💬 抓取评论: ${stats.commentsCount} 条 (一级主评: ${stats.rootCommentsCount} | 二级楼中楼: ${stats.subCommentsCount})\n`;
+      }
+      const bloggerMedia = stats.imagesCount + stats.videosCount + stats.livePhotosCount + stats.audiosCount;
+      if (bloggerMedia > 0) {
+        msg += `🖼️ 媒体下载: ${bloggerMedia} 项 (图: ${stats.imagesCount} | 视: ${stats.videosCount} | 实况: ${stats.livePhotosCount} | 音: ${stats.audiosCount})\n`;
+      }
+      if (stats.postSummaries && stats.postSummaries.length > 0 && stats.postSummaries.length <= 3) {
+        msg += `📋 抓取博文:\n`;
+        for (const p of stats.postSummaries) {
+          const timePart = p.time ? `[${p.time}] ` : '';
+          const tag = p.isRetweet ? ' [转发]' : '';
+          msg += `  • ${timePart}${p.id}${tag}: ${p.snippet || '（无正文文本）'}\n`;
+        }
       }
       if (stats.errors.length > 0) {
         const displayErrors = stats.errors.slice(0, 3).map(e => `• ${e}`).join('\n');
@@ -383,19 +485,99 @@ export class WeiboScraper {
       }
       msg += `\n`;
       totalPosts += stats.postsCount;
+      totalOriginal += stats.originalCount;
+      totalRetweet += stats.retweetCount;
       totalComments += stats.commentsCount;
+      totalRootComments += stats.rootCommentsCount;
+      totalSubComments += stats.subCommentsCount;
+      totalMedia += bloggerMedia;
     }
     
     msg += `====================\n`;
     msg += `📊 运行数据统计汇总:\n`;
     msg += `👥 运行博主总数: ${this.activeStats.size} 位\n`;
-    msg += `📝 累计新增微博: ${totalPosts} 条\n`;
+    msg += `📝 累计新增微博: ${totalPosts} 条 (原创: ${totalOriginal} | 转发: ${totalRetweet})\n`;
     if (config.SCRAPE_COMMENTS) {
-      msg += `💬 累计抓取评论: ${totalComments} 条\n`;
+      msg += `💬 累计抓取评论: ${totalComments} 条 (主评: ${totalRootComments} | 楼中楼: ${totalSubComments})\n`;
+    }
+    if (totalMedia > 0) {
+      msg += `🖼️ 累计媒体下载: ${totalMedia} 项\n`;
     }
     msg += `⏱️ 爬虫运行耗时: ${durationSec} 秒\n`;
     msg += `✨ 增量同步任务全部完成！`;
     
+    return msg;
+  }
+
+  private generateDateSummaryMessage(uid: string, dateStr: string, durationMs: number): string {
+    const stats = this.activeStats.get(uid);
+    const bloggerName = this.screenNameCache.get(uid) || this.getBloggerName(uid) || stats?.name || uid;
+    const displayName = (bloggerName && bloggerName !== uid && !bloggerName.startsWith('user_'))
+      ? `${bloggerName} (${uid})`
+      : uid;
+    const sanitizedScreenName = bloggerName.replace(/[\\/:*?"<>|]/g, '_').trim();
+    const monthSubDir = dateStr.substring(0, 7);
+
+    let msg = `🎯 【定向日期爬取完成报告】\n\n`;
+    msg += `👤 目标博主: ${displayName}\n`;
+    msg += `📅 定向日期: ${dateStr}\n`;
+    msg += `⏱️ 任务耗时: ${this.formatDuration(durationMs)}\n\n`;
+
+    if (!stats || stats.postsCount === 0) {
+      msg += `ℹ️ 抓取结果: 该日期未检索到公开微博。\n`;
+      msg += `（可能当天博主未发博，或所发微博均为转发博文且已被 ONLY_ORIGINAL=true 策略过滤）\n`;
+    } else {
+      msg += `📊 数据抓取统计:\n`;
+      msg += `  📝 发现微博: ${stats.postsCount} 条 (原创: ${stats.originalCount} 条 | 转发: ${stats.retweetCount} 条)\n`;
+      if (config.SCRAPE_COMMENTS) {
+        msg += `  💬 抓取评论: ${stats.commentsCount} 条 (一级主评: ${stats.rootCommentsCount} 条 | 二级楼中楼: ${stats.subCommentsCount} 条)\n`;
+      }
+      const mediaTotal = stats.imagesCount + stats.videosCount + stats.livePhotosCount + stats.audiosCount;
+      msg += `  🖼️ 多媒体下载: 共 ${mediaTotal} 项 (图片: ${stats.imagesCount} | 视频: ${stats.videosCount} | 实况: ${stats.livePhotosCount} | 音频: ${stats.audiosCount})\n\n`;
+
+      if (stats.postSummaries && stats.postSummaries.length > 0) {
+        msg += `📋 博文抓取清单:\n`;
+        const displayPosts = stats.postSummaries.slice(0, 5);
+        for (const p of displayPosts) {
+          const timePart = p.time ? `[${p.time}] ` : '';
+          const tag = p.isRetweet ? ' [转发]' : '';
+          const snippetStr = p.snippet ? `\n    “${p.snippet}${p.snippet.length >= 45 ? '...' : ''}”` : '';
+          msg += `  • ${timePart}ID: ${p.id}${tag} (评: ${p.commentsCount} | 媒: ${p.mediaCount})${snippetStr}\n`;
+        }
+        if (stats.postSummaries.length > 5) {
+          msg += `  ...等共 ${stats.postSummaries.length} 条博文\n`;
+        }
+        msg += `\n`;
+      }
+
+      msg += `💾 数据持久化存储:\n`;
+      if (config.SAVE_TYPES.includes('markdown')) {
+        const mdRelPath = path.join(config.OUTPUT_DIR, sanitizedScreenName, monthSubDir, `${dateStr}.md`);
+        msg += `  📝 Markdown: ${mdRelPath}\n`;
+      }
+      if (config.SAVE_TYPES.includes('json')) {
+        const jsonRelPath = path.join(config.OUTPUT_DIR, sanitizedScreenName, monthSubDir, 'json', `${dateStr}.json`);
+        msg += `  📄 JSON 原文: ${jsonRelPath}\n`;
+      }
+      if (config.SAVE_TYPES.includes('csv')) {
+        const csvRelPath = path.join(config.OUTPUT_DIR, sanitizedScreenName, `${sanitizedScreenName}_weibo.csv`);
+        msg += `  📊 CSV 汇总: ${csvRelPath}\n`;
+      }
+      if (config.DB_TYPE) {
+        msg += `  🗄️ 数据库: ${config.DB_TYPE} (已同步更新)\n`;
+      } else {
+        msg += `  🗄️ 数据库: 未启用\n`;
+      }
+    }
+
+    if (stats && stats.errors.length > 0) {
+      msg += `\n⚠️ 异常提示 (${stats.errors.length} 项):\n`;
+      for (const err of stats.errors.slice(0, 3)) {
+        msg += `  • ${err}\n`;
+      }
+    }
+
+    msg += `\n✨ 该日期定向备份已顺利完成！`;
     return msg;
   }
 
@@ -512,11 +694,7 @@ export class WeiboScraper {
           await this.pipeline.process(parsedPost, comments, screenName, uid);
           this.markPostAsCrawled(uid, postDateStr, parsedPost.id);
 
-          const stats = this.activeStats.get(uid);
-          if (stats) {
-            stats.postsCount++;
-            stats.commentsCount += comments.length;
-          }
+          this.updatePostStats(uid, parsedPost, comments);
         } catch (err: any) {
           logger.error(`处理微博 ID ${parsedPost.id} 时出错: ${err.message}`);
           const stats = this.activeStats.get(uid);
@@ -591,8 +769,8 @@ export class WeiboScraper {
 
     // Fetch detail and comments for each mid
     for (const mid of mids) {
-      // Check if post is already crawled
-      const alreadyCrawled = await this.isPostAlreadyCrawled(uid, screenName, currentDay, mid);
+      // Check if post is already crawled (skip check if running in targeted mode)
+      const alreadyCrawled = !isTargeted && await this.isPostAlreadyCrawled(uid, screenName, currentDay, mid);
       if (alreadyCrawled) {
         logger.info(`微博 ID ${mid} 之前已抓取过且已保存。跳过此条。`);
         continue;
@@ -682,11 +860,7 @@ export class WeiboScraper {
         await this.pipeline.process(parsedPost, comments, screenName, uid);
         this.markPostAsCrawled(uid, currentDay, parsedPost.id);
 
-        const stats = this.activeStats.get(uid);
-        if (stats) {
-          stats.postsCount++;
-          stats.commentsCount += comments.length;
-        }
+        this.updatePostStats(uid, parsedPost, comments);
 
         // Standard delay
         await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 500));
@@ -763,8 +937,14 @@ export class WeiboScraper {
 
       let maxId = '0';
       let keepFetching = true;
+      const seenMaxIds = new Set<string>();
 
       while (keepFetching && parsedComments.length < limit) {
+        if (seenMaxIds.has(maxId)) {
+          break;
+        }
+        seenMaxIds.add(maxId);
+
         let commentsData: any = null;
         try {
           const url = `https://weibo.com/ajax/statuses/buildComments?flow=${currentFlow}&is_reload=1&id=${postId}&is_show_bulletin=2&is_mix=0&count=20&uid=${uid}${maxId !== '0' ? `&max_id=${maxId}` : ''}`;
@@ -804,17 +984,19 @@ export class WeiboScraper {
           const totalNumber = rawComment.total_number || 0;
           if (totalNumber > rawReplies.length && parsedComments.length < limit) {
             spinner.updateText(`正在获取微博 ID: ${postId} 的评论列表: 已获取 ${parsedComments.length} 条 (正在补充楼中楼回复)...`);
-            const maxSubForThisComment = Math.min(
-              config.MAX_SUB_COMMENTS_PER_COMMENT <= 0 ? 100 : config.MAX_SUB_COMMENTS_PER_COMMENT,
-              limit === Infinity ? 100 : Math.max(1, limit - parsedComments.length)
-            );
-            const fetchedReplies = await this.scrapeSubComments(postId, parsedComment.id, uid, maxSubForThisComment);
-            for (const reply of fetchedReplies) {
-              if (!seenCommentIds.has(reply.id)) {
-                seenCommentIds.add(reply.id);
-                parsedComments.push(reply);
+            const subLimitSetting = config.MAX_SUB_COMMENTS_PER_COMMENT <= 0 ? Infinity : config.MAX_SUB_COMMENTS_PER_COMMENT;
+            const remainingQuota = limit === Infinity ? Infinity : Math.max(0, limit - parsedComments.length);
+            const maxSubForThisComment = Math.min(subLimitSetting, remainingQuota);
+
+            if (maxSubForThisComment > 0) {
+              const fetchedReplies = await this.scrapeSubComments(postId, parsedComment.id, uid, maxSubForThisComment);
+              for (const reply of fetchedReplies) {
+                if (!seenCommentIds.has(reply.id)) {
+                  seenCommentIds.add(reply.id);
+                  parsedComments.push(reply);
+                }
+                if (parsedComments.length >= limit) break;
               }
-              if (parsedComments.length >= limit) break;
             }
           }
 
@@ -825,10 +1007,11 @@ export class WeiboScraper {
 
         spinner.updateText(`正在获取微博 ID: ${postId} 的评论列表: 已获取 ${parsedComments.length} 条...`);
 
-        maxId = commentsData?.max_id?.toString() || '0';
-        if (maxId === '0' || maxId === '' || commentsData?.trendsText === '已加载全部评论') {
+        const nextMaxId = commentsData?.max_id?.toString() || '0';
+        if (nextMaxId === '0' || nextMaxId === '' || seenMaxIds.has(nextMaxId)) {
           keepFetching = false;
         } else {
+          maxId = nextMaxId;
           await new Promise(resolve => setTimeout(resolve, config.REQUEST_DELAY_MIN + Math.random() * (config.REQUEST_DELAY_MAX - config.REQUEST_DELAY_MIN)));
         }
       }
@@ -848,10 +1031,17 @@ export class WeiboScraper {
    */
   private async scrapeSubComments(postId: string, parentCommentId: string, uid: string, maxSub = 50): Promise<ParsedComment[]> {
     const subComments: ParsedComment[] = [];
+    const seenSubIds = new Set<string>();
     let maxId = '0';
     let keepFetching = true;
+    const seenSubMaxIds = new Set<string>();
 
     while (keepFetching && subComments.length < maxSub) {
+      if (seenSubMaxIds.has(maxId)) {
+        break;
+      }
+      seenSubMaxIds.add(maxId);
+
       let subCommentsData: any = null;
       try {
         const url = `https://weibo.com/ajax/statuses/buildComments?flow=1&is_reload=1&id=${parentCommentId}&is_show_bulletin=2&is_mix=1&fetch_level=1&count=20&uid=${uid}${maxId !== '0' ? `&max_id=${maxId}` : ''}`;
@@ -870,14 +1060,19 @@ export class WeiboScraper {
       if (data.length === 0) break;
 
       for (const rawSubComment of data) {
-        subComments.push(parseComment(rawSubComment, postId, parentCommentId));
+        const parsed = parseComment(rawSubComment, postId, parentCommentId);
+        if (!seenSubIds.has(parsed.id)) {
+          seenSubIds.add(parsed.id);
+          subComments.push(parsed);
+        }
         if (subComments.length >= maxSub) break;
       }
 
-      maxId = subCommentsData?.max_id?.toString() || '0';
-      if (maxId === '0' || maxId === '' || subCommentsData?.trendsText === '已加载全部评论') {
+      const nextMaxId = subCommentsData?.max_id?.toString() || '0';
+      if (nextMaxId === '0' || nextMaxId === '' || seenSubMaxIds.has(nextMaxId)) {
         keepFetching = false;
       } else {
+        maxId = nextMaxId;
         await new Promise(resolve => setTimeout(resolve, config.REQUEST_DELAY_MIN + Math.random() * (config.REQUEST_DELAY_MAX - config.REQUEST_DELAY_MIN)));
       }
     }
@@ -1072,6 +1267,7 @@ export class WeiboScraper {
       }
     }
 
+    const startTime = Date.now();
     logger.info(`Starting targeted crawl for post: ${rawId} (resolved MID: ${mid})...`);
 
     // Ensure session is active
@@ -1151,13 +1347,64 @@ export class WeiboScraper {
       const postDateStr = parsedPost.time.substring(0, 10);
       this.markPostAsCrawled(uid, postDateStr, parsedPost.id);
 
+      const durationMs = Date.now() - startTime;
+      const sanitizedScreenName = screenName.replace(/[\\/:*?"<>|]/g, '_').trim();
+      const monthSubDir = postDateStr.substring(0, 7);
+      const rootCommentsCount = comments.filter(c => !c.parent_id).length;
+      const subCommentsCount = comments.filter(c => !!c.parent_id).length;
+      const mediaTotal = (parsedPost.local_images?.length || 0) + 
+                         (parsedPost.local_videos?.length || 0) + 
+                         (parsedPost.local_livephotos?.length || 0) + 
+                         (parsedPost.local_audios?.length || 0);
+
+      const contentSnippet = parsedPost.content
+        ? (parsedPost.content.length > 60 ? parsedPost.content.substring(0, 60) + '...' : parsedPost.content)
+        : '（无正文或仅含媒体）';
+
+      let msg = `🎯 【单条微博定向爬取完成报告】\n\n`;
+      msg += `👤 目标博主: ${screenName} (${uid})\n`;
+      msg += `🆔 微博 ID: ${mid}\n`;
+      msg += `🔗 博文链接: https://weibo.com/${uid}/${mid}\n`;
+      msg += `📅 发布时间: ${parsedPost.time}${parsedPost.device ? ` (来自 ${parsedPost.device})` : ''}\n`;
+      msg += `📍 发布位置: ${parsedPost.ip_location || '未知'}\n`;
+      msg += `⏱️ 任务耗时: ${this.formatDuration(durationMs)}\n\n`;
+
+      msg += `📝 正文摘要:\n  “${contentSnippet.replace(/\n/g, ' ')}”\n\n`;
+
+      msg += `📊 互动与抓取统计:\n`;
+      msg += `  🔁 转发: ${parsedPost.reposts_count} | 💬 评论: ${parsedPost.comments_count} | 👍 点赞: ${parsedPost.attitudes_count}\n`;
+      if (config.SCRAPE_COMMENTS) {
+        msg += `  💬 实爬评论: ${comments.length} 条 (一级主评: ${rootCommentsCount} 条 | 二级楼中楼: ${subCommentsCount} 条)\n`;
+      }
+      msg += `  🖼️ 多媒体文件: 共 ${mediaTotal} 项 (图片: ${parsedPost.local_images?.length || 0} | 视频: ${parsedPost.local_videos?.length || 0} | 实况: ${parsedPost.local_livephotos?.length || 0} | 语音: ${parsedPost.local_audios?.length || 0})\n\n`;
+
+      msg += `💾 数据持久化存储:\n`;
+      if (config.SAVE_TYPES.includes('markdown')) {
+        const mdPath = path.join(config.OUTPUT_DIR, sanitizedScreenName, monthSubDir, `${postDateStr}.md`);
+        msg += `  📝 Markdown: ${mdPath}\n`;
+      }
+      if (config.SAVE_TYPES.includes('json')) {
+        const jsonPath = path.join(config.OUTPUT_DIR, sanitizedScreenName, monthSubDir, 'json', `${postDateStr}.json`);
+        msg += `  📄 JSON 原文: ${jsonPath}\n`;
+      }
+      if (config.SAVE_TYPES.includes('csv')) {
+        const csvPath = path.join(config.OUTPUT_DIR, sanitizedScreenName, `${sanitizedScreenName}_weibo.csv`);
+        msg += `  📊 CSV 汇总: ${csvPath}\n`;
+      }
+      if (config.DB_TYPE) {
+        msg += `  🗄️ 数据库: ${config.DB_TYPE} (已同步更新)\n`;
+      }
+
+      msg += `\n✨ 单条微博定向备份成功！`;
+
       return {
         success: true,
-        message: `成功抓取微博 ${mid} (博主 ${screenName})，共计 ${comments.length} 条评论。`
+        message: msg
       };
     } catch (err: any) {
       logger.error(`定向微博 ${mid} 抓取失败:`, err);
-      return { success: false, message: `抓取微博失败: ${err.message || err}` };
+      const durationMs = Date.now() - startTime;
+      return { success: false, message: `抓取微博失败: ${err.message || err} (耗时: ${this.formatDuration(durationMs)})` };
     }
   }
 
@@ -1168,6 +1415,24 @@ export class WeiboScraper {
     const bloggerName = this.getBloggerName(uid) || uid;
     const displayName = bloggerName === uid ? uid : `${bloggerName} (${uid})`;
     logger.info(`正在对 ${displayName} 在日期 ${dateStr} 启动定向爬取...`);
+
+    const startTime = Date.now();
+    this.activeStats.set(uid, {
+      name: bloggerName,
+      postsCount: 0,
+      originalCount: 0,
+      retweetCount: 0,
+      commentsCount: 0,
+      rootCommentsCount: 0,
+      subCommentsCount: 0,
+      imagesCount: 0,
+      videosCount: 0,
+      livePhotosCount: 0,
+      audiosCount: 0,
+      dateRange: dateStr,
+      errors: [],
+      postSummaries: []
+    });
 
     // Ensure session is active
     await AuthManager.ensureLogin("✅ 扫码登录成功！正在开始抓取指定日期数据，请稍候...");
@@ -1200,10 +1465,16 @@ export class WeiboScraper {
         }
       }
       
-      return { success: true, message: `成功完成对 ${displayName} 在日期 ${dateStr} 的定向爬取。` };
+      const durationMs = Date.now() - startTime;
+      const message = this.generateDateSummaryMessage(uid, dateStr, durationMs);
+      return { success: true, message };
     } catch (err: any) {
       logger.error(`定向日期爬取失败:`, err);
-      return { success: false, message: `定向爬取日期数据失败: ${err.message || err}` };
+      const durationMs = Date.now() - startTime;
+      return {
+        success: false,
+        message: `定向爬取 ${displayName} 在日期 ${dateStr} 失败: ${err.message || err} (耗时: ${this.formatDuration(durationMs)})`
+      };
     }
   }
 }

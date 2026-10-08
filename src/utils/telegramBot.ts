@@ -1,4 +1,4 @@
-import { config } from '../config';
+import { config, getMediaDownloadSummary } from '../config';
 import { logger } from './logger';
 import { readUsers, addUser, deleteUser, commentUser, setUserCursor } from './userFileHelper';
 import { readEnv, writeEnv } from './envHelper';
@@ -22,7 +22,22 @@ export class TelegramBot {
     this.running = true;
 
     logger.info("Starting Telegram Bot listener daemon...");
-    await Notifier.sendText("🤖 微博爬虫机器人已成功在交互式守护模式下运行。\n发送 /help 可以查看支持的指令列表。");
+    let activeDesc = '';
+    try {
+      const users = readUsers().filter(u => !u.isCommented && u.uid);
+      activeDesc = `已启用 ${users.length} 位博主 (${users.map(u => u.name || u.uid).join(', ')})`;
+    } catch {}
+
+    let welcomeMsg = `🤖 【微博爬虫守护进程已启动】\n\n`;
+    welcomeMsg += `• 运行模式: Telegram 交互式守护进程\n`;
+    if (activeDesc) {
+      welcomeMsg += `• 监控博主: ${activeDesc}\n`;
+    }
+    if (config.SCHEDULE_CRAWL_TIME) {
+      welcomeMsg += `• 定时同步: 北京时间 ${config.SCHEDULE_CRAWL_TIME}\n`;
+    }
+    welcomeMsg += `• 指令交互: 发送 /help 查看指令手册，发送 /status 查看当前配置与状态。`;
+    await Notifier.sendText(welcomeMsg);
 
     this.startScheduler();
 
@@ -173,18 +188,27 @@ export class TelegramBot {
     const stateExists = fs.existsSync(config.STATE_FILE);
     const sessionExpired = stateExists ? await AuthManager.isSessionExpired() : true;
 
-    const statusMsg = `📊 微博爬虫当前运行状态：
+    let bloggerStats = '未配置';
+    try {
+      const users = readUsers();
+      const active = users.filter((u: any) => !u.isCommented && u.uid);
+      bloggerStats = `已启用 ${active.length} 位 / 共 ${users.filter((u: any) => u.uid).length} 位`;
+    } catch {}
+
+    const statusMsg = `📊 【微博爬虫当前运行状态与配置】
+
 • 登录状态：${stateExists ? (sessionExpired ? "❌ 登录已过期" : "✅ 已登录") : "❌ 未登录 (无 state.json)"}
 • 爬取状态：${this.isCrawling ? "🔄 运行中" : "💤 空闲"}
 • 守护模式：${config.DAEMON_MODE ? "🟢 已启用" : "🔴 已禁用"}
-• 登录模式：${config.LOGIN_MODE}
-• 无头模式：${config.HEADLESS ? "启用" : "禁用"}
-• 开始日期：${config.START_DATE || "无限制（主页模式）"}
-• 结束日期：${config.END_DATE || "无限制（今天）"}
-• 日期排序：${config.DATE_ORDER}
-• 输出目录：${config.OUTPUT_DIR}
+• 监控博主：${bloggerStats}
+• 抓取模式：${config.START_DATE ? `日期区间 (${config.START_DATE} ~ ${config.END_DATE || '今天'})` : '主页增量 Feed'}
+• 博文过滤：${config.ONLY_ORIGINAL ? '仅原创' : '全量 (原创+转发)'}
+• 评论抓取：${config.SCRAPE_COMMENTS ? `已开启 (上限: ${config.MAX_COMMENTS_PER_POST} 条/篇)` : '已禁用'}
+• 媒体下载：${getMediaDownloadSummary()}
+• 自动定时：${config.SCHEDULE_CRAWL_TIME || '未配置'}
 • 存储格式：${config.SAVE_TYPES.join(', ')}
-• 数据库类型：${config.DB_TYPE || "未配置"}`;
+• 数据库类型：${config.DB_TYPE || "未配置"}
+• 输出目录：${config.OUTPUT_DIR}`;
 
     await Notifier.sendText(statusMsg);
   }
@@ -233,7 +257,24 @@ export class TelegramBot {
     }
 
     this.isCrawling = true;
-    await Notifier.sendText("🚀 已在后台启动微博爬取任务,请稍候...");
+    let usersDesc = '';
+    try {
+      const active = readUsers().filter((u: any) => !u.isCommented && u.uid);
+      usersDesc = `共 ${active.length} 位 (${active.map((u: any) => u.name || u.uid).join(', ')})`;
+    } catch {
+      usersDesc = config.USER_ID_LIST;
+    }
+
+    let startMsg = `🚀 【已启动微博增量同步任务】\n\n`;
+    startMsg += `👥 目标博主: ${usersDesc}\n`;
+    startMsg += `⚙️ 运行策略:\n`;
+    startMsg += `  • 抓取模式: ${config.START_DATE ? `日期区间 (${config.START_DATE} ~ ${config.END_DATE || '今天'})` : '主页增量 Feed'}\n`;
+    startMsg += `  • 博文过滤: ${config.ONLY_ORIGINAL ? '仅原创博文' : '全量 (原创 + 转发)'}\n`;
+    startMsg += `  • 评论抓取: ${config.SCRAPE_COMMENTS ? `已开启 (最大上限: ${config.MAX_COMMENTS_PER_POST} 条/篇)` : '已关闭'}\n`;
+    startMsg += `  • 媒体下载: ${getMediaDownloadSummary()}\n`;
+    startMsg += `  • 存储格式: ${config.SAVE_TYPES.join(', ')} | 数据库: ${config.DB_TYPE || '未开启'}\n\n`;
+    startMsg += `⏳ 任务已在后台并发队列中执行，处理完毕后将推送汇总报告。`;
+    await Notifier.sendText(startMsg);
 
     // Run scraper in background
     (async () => {
@@ -436,9 +477,26 @@ export class TelegramBot {
 
     this.isCrawling = true;
     if (isDate) {
-      await Notifier.sendText(`🚀 已在后台启动针对 ${this.getBloggerDisplayName(resolvedUid)} 在日期 ${target} 的定向爬取...`);
+      const displayName = this.getBloggerDisplayName(resolvedUid);
+      let startMsg = `🚀 【已启动定向日期爬取任务】\n\n`;
+      startMsg += `👤 目标博主: ${displayName}\n`;
+      startMsg += `📅 目标日期: ${target}\n`;
+      startMsg += `⚙️ 运行策略:\n`;
+      startMsg += `  • 博文过滤: ${config.ONLY_ORIGINAL ? '仅原创博文' : '全量 (原创 + 转发)'}\n`;
+      startMsg += `  • 评论抓取: ${config.SCRAPE_COMMENTS ? `已开启 (最大上限: ${config.MAX_COMMENTS_PER_POST} 条/篇)` : '已关闭'}\n`;
+      startMsg += `  • 媒体下载: ${getMediaDownloadSummary()}\n`;
+      startMsg += `  • 存储格式: ${config.SAVE_TYPES.join(', ')} | 数据库: ${config.DB_TYPE || '未开启'}\n\n`;
+      startMsg += `⏳ 任务已在后台执行，爬取完成后将推送详细数据报告。`;
+      await Notifier.sendText(startMsg);
     } else {
-      await Notifier.sendText(`🚀 已在后台启动针对微博 "${target}" 的单条定向爬取...`);
+      let startMsg = `🚀 【已启动单条微博定向爬取任务】\n\n`;
+      startMsg += `🆔 目标对象: ${target}\n`;
+      startMsg += `⚙️ 运行策略:\n`;
+      startMsg += `  • 评论抓取: ${config.SCRAPE_COMMENTS ? `已开启 (最大上限: ${config.MAX_COMMENTS_PER_POST} 条)` : '已关闭'}\n`;
+      startMsg += `  • 媒体下载: ${getMediaDownloadSummary()}\n`;
+      startMsg += `  • 存储格式: ${config.SAVE_TYPES.join(', ')} | 数据库: ${config.DB_TYPE || '未开启'}\n\n`;
+      startMsg += `⏳ 任务已在后台执行，爬取完成后将推送详细数据报告。`;
+      await Notifier.sendText(startMsg);
     }
 
     // Run in background
@@ -453,9 +511,9 @@ export class TelegramBot {
         }
 
         if (res.success) {
-          await Notifier.sendText(`✅ 定向爬取成功：\n${res.message}`);
+          await Notifier.sendText(res.message);
         } else {
-          await Notifier.sendText(`❌ 定向爬取失败：\n${res.message}`);
+          await Notifier.sendText(`❌ 【定向爬取失败报告】\n\n${res.message}`);
         }
       } catch (err: any) {
         logger.error(`Error in bot crawl command:`, err);
@@ -504,9 +562,19 @@ export class TelegramBot {
     }
 
     if (isDate) {
-      await Notifier.sendText(`🗑️ 正在对 ${this.getBloggerDisplayName(resolvedUid)} 在日期 ${target} 触发定向物理清除...`);
+      const displayName = this.getBloggerDisplayName(resolvedUid);
+      let startMsg = `🗑️ 【已启动定向日期物理清理任务】\n\n`;
+      startMsg += `👤 目标博主: ${displayName}\n`;
+      startMsg += `📅 目标日期: ${target}\n`;
+      startMsg += `⚠️ 操作说明: 将彻底删除该日期的微博、评论、本地图片/视频等磁盘媒体文件，并同步更新 Markdown、JSON、CSV 及数据库。\n\n`;
+      startMsg += `⏳ 正在执行物理清除，完成后将推送清理明细报告...`;
+      await Notifier.sendText(startMsg);
     } else {
-      await Notifier.sendText(`🗑️ 正在对微博 "${target}" 触发单条定向物理清除...`);
+      let startMsg = `🗑️ 【已启动单条微博定向物理清理任务】\n\n`;
+      startMsg += `🆔 目标对象: ${target}\n`;
+      startMsg += `⚠️ 操作说明: 将彻底删除该微博的所有备份数据（包括关联本地多媒体资产），并同步剔除 Markdown、JSON、CSV 及数据库记录。\n\n`;
+      startMsg += `⏳ 正在执行物理清除，完成后将推送清理明细报告...`;
+      await Notifier.sendText(startMsg);
     }
 
     try {
@@ -519,9 +587,9 @@ export class TelegramBot {
       }
 
       if (res.success) {
-        await Notifier.sendText(`✅ 定向物理删除成功：\n${res.message}`);
+        await Notifier.sendText(res.message);
       } else {
-        await Notifier.sendText(`❌ 定向物理删除失败：\n${res.message}`);
+        await Notifier.sendText(`❌ 【定向物理删除失败】\n\n${res.message}`);
       }
     } catch (err: any) {
       logger.error(`Error in bot delete command:`, err);
