@@ -219,12 +219,19 @@ export class WeiboScraper {
     const snippet = post.content ? post.content.replace(/\s+/g, ' ').trim().slice(0, 45) : '';
     stats.postSummaries.push({
       id: post.id,
-      time: post.time ? (post.time.split(' ')[1] || post.time) : '',
+      time: this.formatPostTimeShort(post.time),
       snippet,
       commentsCount: comments.length,
       mediaCount: imgCount + vidCount + liveCount + audCount,
       isRetweet: !!post.is_retweet
     });
+  }
+
+  private formatPostTimeShort(timeStr: string): string {
+    if (!timeStr) return '';
+    const match = timeStr.match(/(?:T|\s)(\d{2}:\d{2})/);
+    if (match) return match[1];
+    return timeStr.slice(0, 5);
   }
 
   private formatDuration(durationMs: number): string {
@@ -471,12 +478,19 @@ export class WeiboScraper {
       if (bloggerMedia > 0) {
         msg += `🖼️ 媒体下载: ${bloggerMedia} 项 (图: ${stats.imagesCount} | 视: ${stats.videosCount} | 实况: ${stats.livePhotosCount} | 音: ${stats.audiosCount})\n`;
       }
-      if (stats.postSummaries && stats.postSummaries.length > 0 && stats.postSummaries.length <= 3) {
-        msg += `📋 抓取博文:\n`;
-        for (const p of stats.postSummaries) {
-          const timePart = p.time ? `[${p.time}] ` : '';
-          const tag = p.isRetweet ? ' [转发]' : '';
-          msg += `  • ${timePart}${p.id}${tag}: ${p.snippet || '（无正文文本）'}\n`;
+      if (stats.postSummaries && stats.postSummaries.length > 0) {
+        if (stats.postSummaries.length <= 2) {
+          msg += `📋 抓取博文:\n`;
+          for (const p of stats.postSummaries) {
+            const timePart = p.time ? `${p.time} ` : '';
+            const tag = p.isRetweet ? ' [转]' : '';
+            const cleanText = p.snippet ? p.snippet.replace(/\.+$/, '').trim() : '';
+            const snippetStr = cleanText ? `: ${cleanText.slice(0, 36)}...` : '';
+            msg += `  • ${timePart}${tag}(评 ${p.commentsCount})${snippetStr}\n`;
+          }
+        } else {
+          const folderRelPath = path.join(config.OUTPUT_DIR, (realName || uid).replace(/[\\/:*?"<>|]/g, '_').trim());
+          msg += `📁 归档目录: ${folderRelPath} (共 ${stats.postSummaries.length} 条博文已入库)\n`;
         }
       }
       if (stats.errors.length > 0) {
@@ -536,38 +550,41 @@ export class WeiboScraper {
       msg += `  🖼️ 多媒体下载: 共 ${mediaTotal} 项 (图片: ${stats.imagesCount} | 视频: ${stats.videosCount} | 实况: ${stats.livePhotosCount} | 音频: ${stats.audiosCount})\n\n`;
 
       if (stats.postSummaries && stats.postSummaries.length > 0) {
-        msg += `📋 博文抓取清单:\n`;
-        const displayPosts = stats.postSummaries.slice(0, 5);
-        for (const p of displayPosts) {
-          const timePart = p.time ? `[${p.time}] ` : '';
-          const tag = p.isRetweet ? ' [转发]' : '';
-          const snippetStr = p.snippet ? `\n    “${p.snippet}${p.snippet.length >= 45 ? '...' : ''}”` : '';
-          msg += `  • ${timePart}ID: ${p.id}${tag} (评: ${p.commentsCount} | 媒: ${p.mediaCount})${snippetStr}\n`;
-        }
-        if (stats.postSummaries.length > 5) {
-          msg += `  ...等共 ${stats.postSummaries.length} 条博文\n`;
+        if (stats.postSummaries.length <= 3) {
+          msg += `📋 博文抓取清单 (${stats.postSummaries.length} 条):\n`;
+          for (const p of stats.postSummaries) {
+            const timePart = p.time ? `${p.time} ` : '';
+            const tag = p.isRetweet ? ' [转]' : '';
+            const mediaStr = p.mediaCount > 0 ? ` 媒 ${p.mediaCount}` : '';
+            const cleanText = p.snippet ? p.snippet.replace(/\.+$/, '').trim() : '';
+            const snippetStr = cleanText ? `: ${cleanText.slice(0, 38)}...` : '';
+            msg += `  • ${timePart}${tag}(评 ${p.commentsCount}${mediaStr})${snippetStr}\n`;
+          }
+        } else {
+          // Sort by commentsCount descending to show top 2 most engaging posts
+          const sorted = [...stats.postSummaries].sort((a, b) => b.commentsCount - a.commentsCount);
+          const topPosts = sorted.slice(0, 2);
+          const remainingCount = stats.postSummaries.length - 2;
+
+          msg += `🔥 重点博文 (共 ${stats.postSummaries.length} 条，精选互动 Top 2):\n`;
+          for (const p of topPosts) {
+            const timePart = p.time ? `${p.time} ` : '';
+            const tag = p.isRetweet ? ' [转]' : '';
+            const mediaStr = p.mediaCount > 0 ? ` 媒 ${p.mediaCount}` : '';
+            const cleanText = p.snippet ? p.snippet.replace(/\.+$/, '').trim() : '';
+            const snippetStr = cleanText ? `: ${cleanText.slice(0, 38)}...` : '';
+            msg += `  • ${timePart}${tag}(评 ${p.commentsCount}${mediaStr})${snippetStr}\n`;
+          }
+          msg += `  ℹ️ 其余 ${remainingCount} 条博文已完整归档至本地\n`;
         }
         msg += `\n`;
       }
 
-      msg += `💾 数据持久化存储:\n`;
-      if (config.SAVE_TYPES.includes('markdown')) {
-        const mdRelPath = path.join(config.OUTPUT_DIR, sanitizedScreenName, monthSubDir, `${dateStr}.md`);
-        msg += `  📝 Markdown: ${mdRelPath}\n`;
-      }
-      if (config.SAVE_TYPES.includes('json')) {
-        const jsonRelPath = path.join(config.OUTPUT_DIR, sanitizedScreenName, monthSubDir, 'json', `${dateStr}.json`);
-        msg += `  📄 JSON 原文: ${jsonRelPath}\n`;
-      }
-      if (config.SAVE_TYPES.includes('csv')) {
-        const csvRelPath = path.join(config.OUTPUT_DIR, sanitizedScreenName, `${sanitizedScreenName}_weibo.csv`);
-        msg += `  📊 CSV 汇总: ${csvRelPath}\n`;
-      }
-      if (config.DB_TYPE) {
-        msg += `  🗄️ 数据库: ${config.DB_TYPE} (已同步更新)\n`;
-      } else {
-        msg += `  🗄️ 数据库: 未启用\n`;
-      }
+      const folderRelPath = path.join(config.OUTPUT_DIR, sanitizedScreenName, monthSubDir);
+      const formats = config.SAVE_TYPES.map(t => t.toUpperCase()).join(' / ');
+      const dbText = config.DB_TYPE ? ` + 数据库(${config.DB_TYPE})` : '';
+      msg += `💾 存储归档: ${folderRelPath}\n`;
+      msg += `   └─ [${formats}${dbText}] 已同步完成\n`;
     }
 
     if (stats && stats.errors.length > 0) {
@@ -1365,7 +1382,7 @@ export class WeiboScraper {
       msg += `👤 目标博主: ${screenName} (${uid})\n`;
       msg += `🆔 微博 ID: ${mid}\n`;
       msg += `🔗 博文链接: https://weibo.com/${uid}/${mid}\n`;
-      msg += `📅 发布时间: ${parsedPost.time}${parsedPost.device ? ` (来自 ${parsedPost.device})` : ''}\n`;
+      msg += `📅 发布时间: ${parsedPost.time ? parsedPost.time.replace('T', ' ').replace(/\+08:00$/, '') : '未知'}${parsedPost.device ? ` (来自 ${parsedPost.device})` : ''}\n`;
       msg += `📍 发布位置: ${parsedPost.ip_location || '未知'}\n`;
       msg += `⏱️ 任务耗时: ${this.formatDuration(durationMs)}\n\n`;
 
@@ -1378,22 +1395,11 @@ export class WeiboScraper {
       }
       msg += `  🖼️ 多媒体文件: 共 ${mediaTotal} 项 (图片: ${parsedPost.local_images?.length || 0} | 视频: ${parsedPost.local_videos?.length || 0} | 实况: ${parsedPost.local_livephotos?.length || 0} | 语音: ${parsedPost.local_audios?.length || 0})\n\n`;
 
-      msg += `💾 数据持久化存储:\n`;
-      if (config.SAVE_TYPES.includes('markdown')) {
-        const mdPath = path.join(config.OUTPUT_DIR, sanitizedScreenName, monthSubDir, `${postDateStr}.md`);
-        msg += `  📝 Markdown: ${mdPath}\n`;
-      }
-      if (config.SAVE_TYPES.includes('json')) {
-        const jsonPath = path.join(config.OUTPUT_DIR, sanitizedScreenName, monthSubDir, 'json', `${postDateStr}.json`);
-        msg += `  📄 JSON 原文: ${jsonPath}\n`;
-      }
-      if (config.SAVE_TYPES.includes('csv')) {
-        const csvPath = path.join(config.OUTPUT_DIR, sanitizedScreenName, `${sanitizedScreenName}_weibo.csv`);
-        msg += `  📊 CSV 汇总: ${csvPath}\n`;
-      }
-      if (config.DB_TYPE) {
-        msg += `  🗄️ 数据库: ${config.DB_TYPE} (已同步更新)\n`;
-      }
+      const folderRelPath = path.join(config.OUTPUT_DIR, sanitizedScreenName, monthSubDir);
+      const formats = config.SAVE_TYPES.map(t => t.toUpperCase()).join(' / ');
+      const dbText = config.DB_TYPE ? ` + 数据库(${config.DB_TYPE})` : '';
+      msg += `💾 存储归档: ${folderRelPath}\n`;
+      msg += `   └─ [${formats}${dbText}] 已同步备份\n`;
 
       msg += `\n✨ 单条微博定向备份成功！`;
 
