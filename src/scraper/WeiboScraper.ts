@@ -9,25 +9,64 @@ import { parsePost, parseComment, ParsedPost, ParsedComment, cleanHtmlText } fro
 import { StoragePipeline } from '../storage/StoragePipeline';
 import { getDb } from '../storage/db';
 import { resolveMid } from '../utils/base62';
-import { CookieJar } from '../utils/cookieHelper';
+import { sessionManager } from '../auth/SessionManager';
+import { SessionExpiredError } from '../auth/types';
 import { getAxiosProxyConfig } from '../utils/proxyHelper';
+import { readUsers, writeUsers } from '../utils/userFileHelper';
 
-export class SessionExpiredError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'SessionExpiredError';
-  }
-}
+// Re-export for backward compatibility
+export { SessionExpiredError };
 
-function getTodayString(): string {
-  const d = new Date();
-  const beijingMs = d.getTime() + 8 * 3600 * 1000;
-  const beijingDate = new Date(beijingMs);
+function getBeijingDateParts(input: Date | number) {
+  const ts = typeof input === 'number' ? input : input.getTime();
+  const beijingDate = new Date(ts + 8 * 3600 * 1000);
   const pad = (n: number) => String(n).padStart(2, '0');
   const year = beijingDate.getUTCFullYear();
   const month = pad(beijingDate.getUTCMonth() + 1);
   const day = pad(beijingDate.getUTCDate());
-  return `${year}-${month}-${day}`;
+  const hours = pad(beijingDate.getUTCHours());
+  const minutes = pad(beijingDate.getUTCMinutes());
+  const seconds = pad(beijingDate.getUTCSeconds());
+  return {
+    year,
+    month,
+    day,
+    hours,
+    minutes,
+    seconds,
+    dateStr: `${year}-${month}-${day}`,
+    minuteStr: `${year}-${month}-${day} ${hours}:${minutes}`,
+    isoStr: `${year}-${month}-${day}T${hours}:${minutes}:${seconds}`
+  };
+}
+
+function getTodayString(): string {
+  return getBeijingDateParts(Date.now()).dateStr;
+}
+
+function formatToMinute(input: Date | number): string {
+  return getBeijingDateParts(input).minuteStr;
+}
+
+function parseCursorToTimestamp(str: string): number {
+  const trimmed = str.trim();
+  if (!trimmed) return 0;
+  if (/^\d{10,13}$/.test(trimmed)) {
+    const num = parseInt(trimmed, 10);
+    return trimmed.length === 10 ? num * 1000 : num;
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    const ts = Date.parse(`${trimmed}T00:00:00+08:00`);
+    if (!isNaN(ts)) return ts;
+  }
+  if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$/.test(trimmed)) {
+    const iso = trimmed.replace(' ', 'T');
+    const fullIso = iso.split(':').length === 2 ? `${iso}:00` : iso;
+    const ts = Date.parse(`${fullIso}+08:00`);
+    if (!isNaN(ts)) return ts;
+  }
+  const fallback = Date.parse(trimmed);
+  return isNaN(fallback) ? 0 : fallback;
 }
 
 function getDateRange(startDate: string, endDate: string, order: 'asc' | 'desc'): string[] {
@@ -84,10 +123,20 @@ class Spinner {
     }, 80);
   }
 
+  private lastLogTime = 0;
+
   updateText(text: string) {
     this.text = text;
-    if (process.stdout.isTTY && !this.timer) {
-      process.stdout.write(`\r${this.text}`);
+    if (process.stdout.isTTY) {
+      if (!this.timer) {
+        process.stdout.write(`\r${this.text}`);
+      }
+    } else {
+      const now = Date.now();
+      if (now - this.lastLogTime >= 5000) {
+        this.lastLogTime = now;
+        logger.info(this.text);
+      }
     }
   }
 
@@ -105,23 +154,94 @@ class Spinner {
   }
 }
 
+export interface CrawlPostSummary {
+  id: string;
+  time: string;
+  snippet: string;
+  commentsCount: number;
+  mediaCount: number;
+  isRetweet: boolean;
+}
+
+export interface CrawlStatsEntry {
+  name: string;
+  postsCount: number;
+  originalCount: number;
+  retweetCount: number;
+  commentsCount: number;
+  rootCommentsCount: number;
+  subCommentsCount: number;
+  imagesCount: number;
+  videosCount: number;
+  livePhotosCount: number;
+  audiosCount: number;
+  dateRange: string;
+  errors: string[];
+  postSummaries: CrawlPostSummary[];
+}
+
 export class WeiboScraper {
   private pipeline: StoragePipeline;
-  private jar = new CookieJar();
-  private jarLoaded = false;
   private requestQueue: CrawlRequest[] = [];
   private screenNameCache = new Map<string, string>();
   private crawledPostsDayCache = new Map<string, Set<string>>();
-  private activeStats = new Map<string, {
-    name: string;
-    postsCount: number;
-    commentsCount: number;
-    dateRange: string;
-    errors: string[];
-  }>();
+  private activeStats = new Map<string, CrawlStatsEntry>();
 
   constructor() {
     this.pipeline = new StoragePipeline();
+  }
+
+  private updatePostStats(uid: string, post: ParsedPost, comments: ParsedComment[]): void {
+    const stats = this.activeStats.get(uid);
+    if (!stats) return;
+
+    stats.postsCount++;
+    if (post.is_retweet) {
+      stats.retweetCount++;
+    } else {
+      stats.originalCount++;
+    }
+
+    stats.commentsCount += comments.length;
+    stats.rootCommentsCount += comments.filter(c => !c.parent_id).length;
+    stats.subCommentsCount += comments.filter(c => !!c.parent_id).length;
+
+    const imgCount = post.local_images?.length || 0;
+    const vidCount = post.local_videos?.length || 0;
+    const liveCount = post.local_livephotos?.length || 0;
+    const audCount = post.local_audios?.length || 0;
+
+    stats.imagesCount += imgCount;
+    stats.videosCount += vidCount;
+    stats.livePhotosCount += liveCount;
+    stats.audiosCount += audCount;
+
+    const snippet = post.content ? post.content.replace(/\s+/g, ' ').trim().slice(0, 45) : '';
+    stats.postSummaries.push({
+      id: post.id,
+      time: this.formatPostTimeShort(post.time),
+      snippet,
+      commentsCount: comments.length,
+      mediaCount: imgCount + vidCount + liveCount + audCount,
+      isRetweet: !!post.is_retweet
+    });
+  }
+
+  private formatPostTimeShort(timeStr: string): string {
+    if (!timeStr) return '';
+    const match = timeStr.match(/(?:T|\s)(\d{2}:\d{2})/);
+    if (match) return match[1];
+    return timeStr.slice(0, 5);
+  }
+
+  private formatDuration(durationMs: number): string {
+    const sec = (durationMs / 1000).toFixed(1);
+    if (durationMs < 60000) {
+      return `${sec} 秒`;
+    }
+    const mins = Math.floor(durationMs / 60000);
+    const remainSec = Math.round((durationMs % 60000) / 1000);
+    return `${mins} 分 ${remainSec} 秒 (${sec}s)`;
   }
 
   private getDayCacheKey(uid: string, dateStr: string): string {
@@ -138,7 +258,6 @@ export class WeiboScraper {
 
   private getBloggerName(uid: string): string {
     try {
-      const { readUsers } = require('../utils/userFileHelper');
       const users = readUsers();
       const match = users.find((u: any) => u.uid === uid);
       if (match?.name) return match.name;
@@ -147,17 +266,14 @@ export class WeiboScraper {
   }
 
   /**
-   * Helper request builder that attaches Cookies and User-Agent
+   * Helper request builder that attaches Cookies and User-Agent,
+   * delegating session persistence and validation to SessionManager.
    */
   private async makeRequest(url: string, options: any = {}): Promise<any> {
-    if (!this.jarLoaded) {
-      this.jar.load(config.STATE_FILE);
-      this.jarLoaded = true;
-    }
-
     const headers = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Cookie': this.jar.getCookieHeader(url),
+      'Referer': options.headers?.Referer || 'https://weibo.com/',
+      'Cookie': sessionManager.getCookieHeader(url),
       ...(options.headers || {})
     };
 
@@ -168,25 +284,21 @@ export class WeiboScraper {
       headers
     });
 
-    const setCookie = response.headers['set-cookie'];
-    if (setCookie) {
-      this.jar.addCookies(setCookie, url);
-      this.jar.save(config.STATE_FILE);
-    }
+    // Passive session renewal: update Set-Cookie via SessionManager
+    sessionManager.processResponse(response, url);
 
-    // Verify authentication status via redirected URL or HTML content
+    // Verify authentication status via redirected URL or response content
     const finalUrl = response.request?.res?.responseUrl || url;
     const bodyStr = typeof response.data === 'string' ? response.data : '';
-    if (finalUrl.includes('passport.weibo.com') || finalUrl.includes('login.php') || bodyStr.includes('retcode=6102')) {
+    const data = response.data;
+
+    const isLoginRedirect = finalUrl.includes('passport.weibo.com') || finalUrl.includes('login.php');
+    const is6102 = bodyStr.includes('retcode=6102');
+    const isApiUnlogin = data && (data.ok === -100 || (typeof data.url === 'string' && data.url.includes('login.php')));
+
+    if (isLoginRedirect || is6102 || isApiUnlogin) {
       const errMsg = '检测到登录会话过期或被重定向到登录页面。停止爬虫任务。';
       logger.error(errMsg);
-      this.jarLoaded = false;
-      if (fs.existsSync(config.STATE_FILE)) {
-        try {
-          fs.unlinkSync(config.STATE_FILE);
-          logger.warn(`已自动清理失效的会话状态文件 ${config.STATE_FILE}。下一次运行将重新进行扫码鉴权。`);
-        } catch {}
-      }
       throw new SessionExpiredError(errMsg);
     }
 
@@ -207,8 +319,8 @@ export class WeiboScraper {
     let uids: string[] = [];
     const list = config.USER_ID_LIST.trim();
     if (list.toLowerCase().endsWith('.txt')) {
-      const filePath = this.getCursorFilePath();
-      uids = this.loadUidsFromCursorFile(filePath);
+      const users = readUsers();
+      uids = users.filter((u: any) => !u.isCommented && u.uid).map((u: any) => u.uid!);
     } else {
       uids = list.split(',').map(s => s.trim()).filter(Boolean);
     }
@@ -219,12 +331,6 @@ export class WeiboScraper {
       return errMsg;
     }
 
-    const uidNames = uids.map(uid => {
-      const name = this.getBloggerName(uid);
-      return name ? `${name} (${uid})` : uid;
-    });
-    logger.info(`正在启动针对博主列表的抓取: ${uidNames.join(', ')}`);
-
     this.activeStats.clear();
     const startTime = Date.now();
 
@@ -233,29 +339,52 @@ export class WeiboScraper {
 
     for (const uid of uids) {
       const cursor = this.getCursorForUser(uid);
+      const bloggerName = (await this.getScreenName(uid)) || uid;
 
       let startDateStr = config.START_DATE;
+      let startDateTimeStr = '';
+      let endDateTimeStr = '';
+
+      const now = new Date();
+      const currentNowStr = formatToMinute(now);
+      const todayStr = getTodayString();
+      const effectiveEndDate = config.END_DATE || todayStr;
+
       if (cursor > 0) {
-        const date = new Date(cursor);
-        const y = date.getFullYear();
-        const m = String(date.getMonth() + 1).padStart(2, '0');
-        const d = String(date.getDate()).padStart(2, '0');
-        startDateStr = `${y}-${m}-${d}`;
+        const bp = getBeijingDateParts(cursor);
+        startDateTimeStr = bp.minuteStr;
+        startDateStr = bp.dateStr;
+      } else if (config.START_DATE) {
+        startDateStr = config.START_DATE;
+        startDateTimeStr = `${config.START_DATE} 00:00`;
       }
 
-      const bloggerName = this.getBloggerName(uid) || uid;
-      let dateRangeStr = '主页 Feed 模式';
-      if (startDateStr) {
-        const effectiveEndDate = config.END_DATE || getTodayString();
-        dateRangeStr = `${startDateStr} 至 ${effectiveEndDate}`;
+      if (config.END_DATE && config.END_DATE !== todayStr) {
+        endDateTimeStr = `${config.END_DATE} 23:59`;
+      } else {
+        endDateTimeStr = currentNowStr;
+      }
+
+      let dateRangeStr = `主页 Feed 模式 (截至 ${currentNowStr})`;
+      if (startDateTimeStr) {
+        dateRangeStr = `${startDateTimeStr} 至 ${endDateTimeStr}`;
       }
 
       this.activeStats.set(uid, {
         name: bloggerName,
         postsCount: 0,
+        originalCount: 0,
+        retweetCount: 0,
         commentsCount: 0,
+        rootCommentsCount: 0,
+        subCommentsCount: 0,
+        imagesCount: 0,
+        videosCount: 0,
+        livePhotosCount: 0,
+        audiosCount: 0,
         dateRange: dateRangeStr,
-        errors: []
+        errors: [],
+        postSummaries: []
       });
 
       if (startDateStr) {
@@ -303,12 +432,7 @@ export class WeiboScraper {
         } catch (err: any) {
           logger.error(`请求失败 (${attempts}/${maxAttempts}): ${req.url}。错误: ${err.message || err}`);
           if (err instanceof SessionExpiredError || err.message?.includes('检测到登录会话过期')) {
-            logger.error('检测到登录会话已过期，已清除本地凭证并停止当前队列。');
-            if (fs.existsSync(config.STATE_FILE)) {
-              try {
-                fs.unlinkSync(config.STATE_FILE);
-              } catch {}
-            }
+            logger.error('检测到登录会话已过期，停止当前爬取队列。由上层调度统一处理重新鉴权。');
             throw err;
           }
           if (attempts >= maxAttempts) {
@@ -330,16 +454,46 @@ export class WeiboScraper {
   }
 
   private generateSummaryMessage(durationSec: string): string {
-    let msg = "🤖 微博爬虫增量同步运行报告\n\n";
+    let msg = "🤖 【微博爬虫增量同步运行报告】\n\n";
     let totalPosts = 0;
+    let totalOriginal = 0;
+    let totalRetweet = 0;
     let totalComments = 0;
+    let totalRootComments = 0;
+    let totalSubComments = 0;
+    let totalMedia = 0;
     
     for (const [uid, stats] of this.activeStats.entries()) {
-      msg += `👤 博主: ${stats.name} (${uid})\n`;
+      const realName = this.screenNameCache.get(uid) || this.getBloggerName(uid) || stats.name;
+      const displayName = (realName && realName !== uid && !realName.startsWith('user_'))
+        ? `${realName} (${uid})`
+        : uid;
+      msg += `👤 博主: ${displayName}\n`;
       msg += `📅 区间: ${stats.dateRange}\n`;
-      msg += `📥 新增微博: ${stats.postsCount} 条\n`;
+      msg += `📥 新增微博: ${stats.postsCount} 条 (原创: ${stats.originalCount} | 转发: ${stats.retweetCount})\n`;
       if (config.SCRAPE_COMMENTS) {
-        msg += `💬 抓取评论: ${stats.commentsCount} 条\n`;
+        msg += `💬 抓取评论: ${stats.commentsCount} 条 (一级主评: ${stats.rootCommentsCount} | 二级楼中楼: ${stats.subCommentsCount})\n`;
+      }
+      const bloggerMedia = stats.imagesCount + stats.videosCount + stats.livePhotosCount + stats.audiosCount;
+      if (bloggerMedia > 0) {
+        msg += `🖼️ 媒体下载: ${bloggerMedia} 项 (图: ${stats.imagesCount} | 视: ${stats.videosCount} | 实况: ${stats.livePhotosCount} | 音: ${stats.audiosCount})\n`;
+      }
+      if (stats.postSummaries && stats.postSummaries.length > 0) {
+        if (stats.postSummaries.length <= 2) {
+          msg += `📋 抓取博文:\n`;
+          for (const p of stats.postSummaries) {
+            const parts: string[] = [];
+            if (p.time) parts.push(p.time);
+            if (p.isRetweet) parts.push('[转]');
+            parts.push(`(评 ${p.commentsCount})`);
+            const cleanText = p.snippet ? p.snippet.replace(/\.+$/, '').trim() : '';
+            const snippetStr = cleanText ? `: ${cleanText.slice(0, 36)}...` : '';
+            msg += `  • ${parts.join(' ')}${snippetStr}\n`;
+          }
+        } else {
+          const folderRelPath = path.join(config.OUTPUT_DIR, (realName || uid).replace(/[\\/:*?"<>|]/g, '_').trim());
+          msg += `📁 归档目录: ${folderRelPath} (共 ${stats.postSummaries.length} 条博文已入库)\n`;
+        }
       }
       if (stats.errors.length > 0) {
         const displayErrors = stats.errors.slice(0, 3).map(e => `• ${e}`).join('\n');
@@ -347,19 +501,103 @@ export class WeiboScraper {
       }
       msg += `\n`;
       totalPosts += stats.postsCount;
+      totalOriginal += stats.originalCount;
+      totalRetweet += stats.retweetCount;
       totalComments += stats.commentsCount;
+      totalRootComments += stats.rootCommentsCount;
+      totalSubComments += stats.subCommentsCount;
+      totalMedia += bloggerMedia;
     }
     
     msg += `====================\n`;
     msg += `📊 运行数据统计汇总:\n`;
     msg += `👥 运行博主总数: ${this.activeStats.size} 位\n`;
-    msg += `📝 累计新增微博: ${totalPosts} 条\n`;
+    msg += `📝 累计新增微博: ${totalPosts} 条 (原创: ${totalOriginal} | 转发: ${totalRetweet})\n`;
     if (config.SCRAPE_COMMENTS) {
-      msg += `💬 累计抓取评论: ${totalComments} 条\n`;
+      msg += `💬 累计抓取评论: ${totalComments} 条 (主评: ${totalRootComments} | 楼中楼: ${totalSubComments})\n`;
+    }
+    if (totalMedia > 0) {
+      msg += `🖼️ 累计媒体下载: ${totalMedia} 项\n`;
     }
     msg += `⏱️ 爬虫运行耗时: ${durationSec} 秒\n`;
     msg += `✨ 增量同步任务全部完成！`;
     
+    return msg;
+  }
+
+  private generateDateSummaryMessage(uid: string, dateStr: string, durationMs: number): string {
+    const stats = this.activeStats.get(uid);
+    const bloggerName = this.screenNameCache.get(uid) || this.getBloggerName(uid) || stats?.name || uid;
+    const displayName = (bloggerName && bloggerName !== uid && !bloggerName.startsWith('user_'))
+      ? `${bloggerName} (${uid})`
+      : uid;
+    const sanitizedScreenName = bloggerName.replace(/[\\/:*?"<>|]/g, '_').trim();
+    const monthSubDir = dateStr.substring(0, 7);
+
+    let msg = `🎯 【定向日期爬取完成报告】\n\n`;
+    msg += `👤 目标博主: ${displayName}\n`;
+    msg += `📅 定向日期: ${dateStr}\n`;
+    msg += `⏱️ 任务耗时: ${this.formatDuration(durationMs)}\n\n`;
+
+    if (!stats || stats.postsCount === 0) {
+      msg += `ℹ️ 抓取结果: 该日期未检索到公开微博。\n`;
+      msg += `（可能当天博主未发博，或所发微博均为转发博文且已被 ONLY_ORIGINAL=true 策略过滤）\n`;
+    } else {
+      msg += `📊 数据抓取统计:\n`;
+      msg += `  📝 发现微博: ${stats.postsCount} 条 (原创: ${stats.originalCount} 条 | 转发: ${stats.retweetCount} 条)\n`;
+      if (config.SCRAPE_COMMENTS) {
+        msg += `  💬 抓取评论: ${stats.commentsCount} 条 (一级主评: ${stats.rootCommentsCount} 条 | 二级楼中楼: ${stats.subCommentsCount} 条)\n`;
+      }
+      const mediaTotal = stats.imagesCount + stats.videosCount + stats.livePhotosCount + stats.audiosCount;
+      msg += `  🖼️ 多媒体下载: 共 ${mediaTotal} 项 (图片: ${stats.imagesCount} | 视频: ${stats.videosCount} | 实况: ${stats.livePhotosCount} | 音频: ${stats.audiosCount})\n\n`;
+
+      if (stats.postSummaries && stats.postSummaries.length > 0) {
+        const formatPostItem = (p: CrawlPostSummary) => {
+          const parts: string[] = [];
+          if (p.time) parts.push(p.time);
+          if (p.isRetweet) parts.push('[转]');
+          const mediaStr = p.mediaCount > 0 ? ` 媒 ${p.mediaCount}` : '';
+          parts.push(`(评 ${p.commentsCount}${mediaStr})`);
+          const cleanText = p.snippet ? p.snippet.replace(/\.+$/, '').trim() : '';
+          const snippetStr = cleanText ? `: ${cleanText.slice(0, 38)}...` : '';
+          return `  • ${parts.join(' ')}${snippetStr}`;
+        };
+
+        if (stats.postSummaries.length <= 3) {
+          msg += `📋 博文抓取清单 (${stats.postSummaries.length} 条):\n`;
+          for (const p of stats.postSummaries) {
+            msg += `${formatPostItem(p)}\n`;
+          }
+        } else {
+          // Sort by commentsCount descending to show top 2 most engaging posts
+          const sorted = [...stats.postSummaries].sort((a, b) => b.commentsCount - a.commentsCount);
+          const topPosts = sorted.slice(0, 2);
+          const remainingCount = stats.postSummaries.length - 2;
+
+          msg += `🔥 重点博文 (共 ${stats.postSummaries.length} 条，精选互动 Top 2):\n`;
+          for (const p of topPosts) {
+            msg += `${formatPostItem(p)}\n`;
+          }
+          msg += `  ℹ️ 其余 ${remainingCount} 条博文已完整归档至本地\n`;
+        }
+        msg += `\n`;
+      }
+
+      const folderRelPath = path.join(config.OUTPUT_DIR, sanitizedScreenName, monthSubDir);
+      const formats = config.SAVE_TYPES.map(t => t.toUpperCase()).join(' / ');
+      const dbText = config.DB_TYPE ? ` + 数据库(${config.DB_TYPE})` : '';
+      msg += `💾 存储归档: ${folderRelPath}\n`;
+      msg += `   └─ [${formats}${dbText}] 已同步完成\n`;
+    }
+
+    if (stats && stats.errors.length > 0) {
+      msg += `\n⚠️ 异常提示 (${stats.errors.length} 项):\n`;
+      for (const err of stats.errors.slice(0, 3)) {
+        msg += `  • ${err}\n`;
+      }
+    }
+
+    msg += `\n✨ 该日期定向备份已顺利完成！`;
     return msg;
   }
 
@@ -369,6 +607,10 @@ export class WeiboScraper {
   private async handleProfilePage(userData: any): Promise<void> {
     const { uid, cursor } = userData;
     const screenName = await this.getScreenName(uid);
+    const stats = this.activeStats.get(uid);
+    if (stats && screenName && screenName !== `user_${uid}`) {
+      stats.name = screenName;
+    }
     const displayName = `${screenName} (${uid})`;
     logger.info(`正在抓取 ${displayName} 的主页 Feed`);
 
@@ -472,11 +714,7 @@ export class WeiboScraper {
           await this.pipeline.process(parsedPost, comments, screenName, uid);
           this.markPostAsCrawled(uid, postDateStr, parsedPost.id);
 
-          const stats = this.activeStats.get(uid);
-          if (stats) {
-            stats.postsCount++;
-            stats.commentsCount += comments.length;
-          }
+          this.updatePostStats(uid, parsedPost, comments);
         } catch (err: any) {
           logger.error(`处理微博 ID ${parsedPost.id} 时出错: ${err.message}`);
           const stats = this.activeStats.get(uid);
@@ -542,13 +780,17 @@ export class WeiboScraper {
 
     // Get user profile screen name (cached per UID)
     const screenName = await this.getScreenName(uid);
+    const stats = this.activeStats.get(uid);
+    if (stats && screenName && screenName !== `user_${uid}`) {
+      stats.name = screenName;
+    }
 
     let latestPostTimestamp = 0;
 
     // Fetch detail and comments for each mid
     for (const mid of mids) {
-      // Check if post is already crawled
-      const alreadyCrawled = await this.isPostAlreadyCrawled(uid, screenName, currentDay, mid);
+      // Check if post is already crawled (skip check if running in targeted mode)
+      const alreadyCrawled = !isTargeted && await this.isPostAlreadyCrawled(uid, screenName, currentDay, mid);
       if (alreadyCrawled) {
         logger.info(`微博 ID ${mid} 之前已抓取过且已保存。跳过此条。`);
         continue;
@@ -575,6 +817,19 @@ export class WeiboScraper {
         }
 
         const postTime = new Date(parsedPost.time).getTime();
+
+        const postAuthorName = postData?.user?.screen_name;
+        if (postAuthorName) {
+          const cached = this.screenNameCache.get(uid);
+          if (!cached || cached === uid || cached.startsWith('user_')) {
+            this.screenNameCache.set(uid, postAuthorName);
+            this.saveBloggerNameToUserFile(uid, postAuthorName);
+          }
+          const s = this.activeStats.get(uid);
+          if (s && (!s.name || s.name === uid || s.name.startsWith('user_'))) {
+            s.name = postAuthorName;
+          }
+        }
 
         // Verify date ranges
         const targetStartDate = actualStartDate || config.START_DATE;
@@ -625,11 +880,7 @@ export class WeiboScraper {
         await this.pipeline.process(parsedPost, comments, screenName, uid);
         this.markPostAsCrawled(uid, currentDay, parsedPost.id);
 
-        const stats = this.activeStats.get(uid);
-        if (stats) {
-          stats.postsCount++;
-          stats.commentsCount += comments.length;
-        }
+        this.updatePostStats(uid, parsedPost, comments);
 
         // Standard delay
         await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 500));
@@ -706,8 +957,14 @@ export class WeiboScraper {
 
       let maxId = '0';
       let keepFetching = true;
+      const seenMaxIds = new Set<string>();
 
       while (keepFetching && parsedComments.length < limit) {
+        if (seenMaxIds.has(maxId)) {
+          break;
+        }
+        seenMaxIds.add(maxId);
+
         let commentsData: any = null;
         try {
           const url = `https://weibo.com/ajax/statuses/buildComments?flow=${currentFlow}&is_reload=1&id=${postId}&is_show_bulletin=2&is_mix=0&count=20&uid=${uid}${maxId !== '0' ? `&max_id=${maxId}` : ''}`;
@@ -747,17 +1004,19 @@ export class WeiboScraper {
           const totalNumber = rawComment.total_number || 0;
           if (totalNumber > rawReplies.length && parsedComments.length < limit) {
             spinner.updateText(`正在获取微博 ID: ${postId} 的评论列表: 已获取 ${parsedComments.length} 条 (正在补充楼中楼回复)...`);
-            const maxSubForThisComment = Math.min(
-              config.MAX_SUB_COMMENTS_PER_COMMENT <= 0 ? 100 : config.MAX_SUB_COMMENTS_PER_COMMENT,
-              limit === Infinity ? 100 : Math.max(1, limit - parsedComments.length)
-            );
-            const fetchedReplies = await this.scrapeSubComments(postId, parsedComment.id, uid, maxSubForThisComment);
-            for (const reply of fetchedReplies) {
-              if (!seenCommentIds.has(reply.id)) {
-                seenCommentIds.add(reply.id);
-                parsedComments.push(reply);
+            const subLimitSetting = config.MAX_SUB_COMMENTS_PER_COMMENT <= 0 ? Infinity : config.MAX_SUB_COMMENTS_PER_COMMENT;
+            const remainingQuota = limit === Infinity ? Infinity : Math.max(0, limit - parsedComments.length);
+            const maxSubForThisComment = Math.min(subLimitSetting, remainingQuota);
+
+            if (maxSubForThisComment > 0) {
+              const fetchedReplies = await this.scrapeSubComments(postId, parsedComment.id, uid, maxSubForThisComment);
+              for (const reply of fetchedReplies) {
+                if (!seenCommentIds.has(reply.id)) {
+                  seenCommentIds.add(reply.id);
+                  parsedComments.push(reply);
+                }
+                if (parsedComments.length >= limit) break;
               }
-              if (parsedComments.length >= limit) break;
             }
           }
 
@@ -768,10 +1027,11 @@ export class WeiboScraper {
 
         spinner.updateText(`正在获取微博 ID: ${postId} 的评论列表: 已获取 ${parsedComments.length} 条...`);
 
-        maxId = commentsData?.max_id?.toString() || '0';
-        if (maxId === '0' || maxId === '' || commentsData?.trendsText === '已加载全部评论') {
+        const nextMaxId = commentsData?.max_id?.toString() || '0';
+        if (nextMaxId === '0' || nextMaxId === '' || seenMaxIds.has(nextMaxId)) {
           keepFetching = false;
         } else {
+          maxId = nextMaxId;
           await new Promise(resolve => setTimeout(resolve, config.REQUEST_DELAY_MIN + Math.random() * (config.REQUEST_DELAY_MAX - config.REQUEST_DELAY_MIN)));
         }
       }
@@ -791,10 +1051,17 @@ export class WeiboScraper {
    */
   private async scrapeSubComments(postId: string, parentCommentId: string, uid: string, maxSub = 50): Promise<ParsedComment[]> {
     const subComments: ParsedComment[] = [];
+    const seenSubIds = new Set<string>();
     let maxId = '0';
     let keepFetching = true;
+    const seenSubMaxIds = new Set<string>();
 
     while (keepFetching && subComments.length < maxSub) {
+      if (seenSubMaxIds.has(maxId)) {
+        break;
+      }
+      seenSubMaxIds.add(maxId);
+
       let subCommentsData: any = null;
       try {
         const url = `https://weibo.com/ajax/statuses/buildComments?flow=1&is_reload=1&id=${parentCommentId}&is_show_bulletin=2&is_mix=1&fetch_level=1&count=20&uid=${uid}${maxId !== '0' ? `&max_id=${maxId}` : ''}`;
@@ -813,14 +1080,19 @@ export class WeiboScraper {
       if (data.length === 0) break;
 
       for (const rawSubComment of data) {
-        subComments.push(parseComment(rawSubComment, postId, parentCommentId));
+        const parsed = parseComment(rawSubComment, postId, parentCommentId);
+        if (!seenSubIds.has(parsed.id)) {
+          seenSubIds.add(parsed.id);
+          subComments.push(parsed);
+        }
         if (subComments.length >= maxSub) break;
       }
 
-      maxId = subCommentsData?.max_id?.toString() || '0';
-      if (maxId === '0' || maxId === '' || subCommentsData?.trendsText === '已加载全部评论') {
+      const nextMaxId = subCommentsData?.max_id?.toString() || '0';
+      if (nextMaxId === '0' || nextMaxId === '' || seenSubMaxIds.has(nextMaxId)) {
         keepFetching = false;
       } else {
+        maxId = nextMaxId;
         await new Promise(resolve => setTimeout(resolve, config.REQUEST_DELAY_MIN + Math.random() * (config.REQUEST_DELAY_MAX - config.REQUEST_DELAY_MIN)));
       }
     }
@@ -900,49 +1172,12 @@ export class WeiboScraper {
 
   // --- Cursor Management (Incremental Sync) ---
 
-  private getCursorFilePath(): string {
-    const list = config.USER_ID_LIST.trim();
-    if (list.toLowerCase().endsWith('.txt')) {
-      return path.isAbsolute(list) ? list : path.join(process.cwd(), list);
-    }
-    return path.join(process.cwd(), 'userid.txt');
-  }
-
-  private loadUidsFromCursorFile(filePath: string): string[] {
-    if (!fs.existsSync(filePath)) {
-      return [];
-    }
-    try {
-      const content = fs.readFileSync(filePath, 'utf8');
-      return content.split('\n')
-        .map(line => line.trim())
-        .filter(line => line && !line.startsWith('#'))
-        .map(line => line.split('|')[0].trim());
-    } catch (err) {
-      logger.error(`Failed to read cursor file: ${filePath}`, err);
-      return [];
-    }
-  }
-
   private getCursorForUser(uid: string): number {
-    const filePath = this.getCursorFilePath();
-    if (!fs.existsSync(filePath)) {
-      return 0;
-    }
     try {
-      const content = fs.readFileSync(filePath, 'utf8');
-      const lines = content.split('\n');
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith('#')) continue;
-        const parts = trimmed.split('|');
-        if (parts[0].trim() === uid) {
-          const tsStr = parts[2]?.trim();
-          if (tsStr) {
-            const ts = /^\d+$/.test(tsStr) ? parseInt(tsStr, 10) : Date.parse(tsStr);
-            return isNaN(ts) ? 0 : ts;
-          }
-        }
+      const users = readUsers();
+      const match = users.find((u: any) => u.uid === uid && !u.isCommented);
+      if (match?.cursor) {
+        return parseCursorToTimestamp(match.cursor);
       }
     } catch (err) {
       logger.error(`Error reading cursor for UID ${uid}`, err);
@@ -958,44 +1193,20 @@ export class WeiboScraper {
         return;
       }
 
-      const formatLocalISOString = (ts: number): string => {
-        const date = new Date(ts);
-        const pad = (n: number) => String(n).padStart(2, '0');
-        const year = date.getFullYear();
-        const month = pad(date.getMonth() + 1);
-        const day = pad(date.getDate());
-        const hours = pad(date.getHours());
-        const minutes = pad(date.getMinutes());
-        const seconds = pad(date.getSeconds());
-        return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}`;
-      };
-
-      const dateStr = formatLocalISOString(timestamp);
-      const filePath = this.getCursorFilePath();
-      let content = '';
-      if (fs.existsSync(filePath)) {
-        content = fs.readFileSync(filePath, 'utf8');
-      }
-
-      const lines = content.split('\n');
-      let found = false;
-      const updatedLines = lines.map(line => {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith('#')) return line;
-        const parts = trimmed.split('|');
-        if (parts[0].trim() === uid) {
-          found = true;
-          return `${uid} | ${name} | ${dateStr}`;
+      const dateStr = getBeijingDateParts(timestamp).isoStr;
+      const users = readUsers();
+      const user = users.find((u: any) => u.uid === uid);
+      if (user) {
+        user.cursor = dateStr;
+        if (name && !user.name) {
+          user.name = name;
         }
-        return line;
-      });
-
-      if (!found) {
-        updatedLines.push(`${uid} | ${name} | ${dateStr}`);
+        writeUsers(users);
+      } else {
+        users.push({ uid, name, cursor: dateStr, isCommented: false });
+        writeUsers(users);
       }
-
-      fs.writeFileSync(filePath, updatedLines.join('\n'), 'utf8');
-      logger.info(`Updated cursor file for ${name} (${uid}) to date ${dateStr} (timestamp: ${timestamp})`);
+      logger.info(`Updated cursor file for ${name || uid} (${uid}) to date ${dateStr} (timestamp: ${timestamp})`);
     } catch (err) {
       logger.error(`Failed to update cursor for UID ${uid}`, err);
     }
@@ -1003,22 +1214,13 @@ export class WeiboScraper {
 
   private saveBloggerNameToUserFile(uid: string, name: string): void {
     try {
-      const filePath = this.getCursorFilePath();
-      if (!fs.existsSync(filePath)) return;
-      const content = fs.readFileSync(filePath, 'utf8');
-      const lines = content.split('\n');
-      const updatedLines = lines.map(line => {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith('#')) return line;
-        const parts = trimmed.split('|');
-        if (parts[0].trim() === uid) {
-          const cursor = parts[2]?.trim() || '';
-          return cursor ? `${uid} | ${name} | ${cursor}` : `${uid} | ${name}`;
-        }
-        return line;
-      });
-      fs.writeFileSync(filePath, updatedLines.join('\n'), 'utf8');
-      logger.info(`已成功将博主 ${name} (${uid}) 的昵称持久化保存至 ${filePath}`);
+      const users = readUsers();
+      const user = users.find((u: any) => u.uid === uid);
+      if (user) {
+        user.name = name;
+        writeUsers(users);
+        logger.info(`已成功将博主 ${name} (${uid}) 的昵称持久化保存至用户文件`);
+      }
     } catch (err) {
       logger.error(`保存博主昵称至用户文件失败:`, err);
     }
@@ -1085,6 +1287,7 @@ export class WeiboScraper {
       }
     }
 
+    const startTime = Date.now();
     logger.info(`Starting targeted crawl for post: ${rawId} (resolved MID: ${mid})...`);
 
     // Ensure session is active
@@ -1164,13 +1367,53 @@ export class WeiboScraper {
       const postDateStr = parsedPost.time.substring(0, 10);
       this.markPostAsCrawled(uid, postDateStr, parsedPost.id);
 
+      const durationMs = Date.now() - startTime;
+      const sanitizedScreenName = screenName.replace(/[\\/:*?"<>|]/g, '_').trim();
+      const monthSubDir = postDateStr.substring(0, 7);
+      const rootCommentsCount = comments.filter(c => !c.parent_id).length;
+      const subCommentsCount = comments.filter(c => !!c.parent_id).length;
+      const mediaTotal = (parsedPost.local_images?.length || 0) + 
+                         (parsedPost.local_videos?.length || 0) + 
+                         (parsedPost.local_livephotos?.length || 0) + 
+                         (parsedPost.local_audios?.length || 0);
+
+      const contentSnippet = parsedPost.content
+        ? (parsedPost.content.length > 60 ? parsedPost.content.substring(0, 60) + '...' : parsedPost.content)
+        : '（无正文或仅含媒体）';
+
+      let msg = `🎯 【单条微博定向爬取完成报告】\n\n`;
+      msg += `👤 目标博主: ${screenName} (${uid})\n`;
+      msg += `🆔 微博 ID: ${mid}\n`;
+      msg += `🔗 博文链接: https://weibo.com/${uid}/${mid}\n`;
+      msg += `📅 发布时间: ${parsedPost.time ? parsedPost.time.replace('T', ' ').replace(/\+08:00$/, '') : '未知'}${parsedPost.device ? ` (来自 ${parsedPost.device})` : ''}\n`;
+      msg += `📍 发布位置: ${parsedPost.ip_location || '未知'}\n`;
+      msg += `⏱️ 任务耗时: ${this.formatDuration(durationMs)}\n\n`;
+
+      msg += `📝 正文摘要:\n  “${contentSnippet.replace(/\n/g, ' ')}”\n\n`;
+
+      msg += `📊 互动与抓取统计:\n`;
+      msg += `  🔁 转发: ${parsedPost.reposts_count} | 💬 评论: ${parsedPost.comments_count} | 👍 点赞: ${parsedPost.attitudes_count}\n`;
+      if (config.SCRAPE_COMMENTS) {
+        msg += `  💬 实爬评论: ${comments.length} 条 (一级主评: ${rootCommentsCount} 条 | 二级楼中楼: ${subCommentsCount} 条)\n`;
+      }
+      msg += `  🖼️ 多媒体文件: 共 ${mediaTotal} 项 (图片: ${parsedPost.local_images?.length || 0} | 视频: ${parsedPost.local_videos?.length || 0} | 实况: ${parsedPost.local_livephotos?.length || 0} | 语音: ${parsedPost.local_audios?.length || 0})\n\n`;
+
+      const folderRelPath = path.join(config.OUTPUT_DIR, sanitizedScreenName, monthSubDir);
+      const formats = config.SAVE_TYPES.map(t => t.toUpperCase()).join(' / ');
+      const dbText = config.DB_TYPE ? ` + 数据库(${config.DB_TYPE})` : '';
+      msg += `💾 存储归档: ${folderRelPath}\n`;
+      msg += `   └─ [${formats}${dbText}] 已同步备份\n`;
+
+      msg += `\n✨ 单条微博定向备份成功！`;
+
       return {
         success: true,
-        message: `成功抓取微博 ${mid} (博主 ${screenName})，共计 ${comments.length} 条评论。`
+        message: msg
       };
     } catch (err: any) {
       logger.error(`定向微博 ${mid} 抓取失败:`, err);
-      return { success: false, message: `抓取微博失败: ${err.message || err}` };
+      const durationMs = Date.now() - startTime;
+      return { success: false, message: `抓取微博失败: ${err.message || err} (耗时: ${this.formatDuration(durationMs)})` };
     }
   }
 
@@ -1181,6 +1424,24 @@ export class WeiboScraper {
     const bloggerName = this.getBloggerName(uid) || uid;
     const displayName = bloggerName === uid ? uid : `${bloggerName} (${uid})`;
     logger.info(`正在对 ${displayName} 在日期 ${dateStr} 启动定向爬取...`);
+
+    const startTime = Date.now();
+    this.activeStats.set(uid, {
+      name: bloggerName,
+      postsCount: 0,
+      originalCount: 0,
+      retweetCount: 0,
+      commentsCount: 0,
+      rootCommentsCount: 0,
+      subCommentsCount: 0,
+      imagesCount: 0,
+      videosCount: 0,
+      livePhotosCount: 0,
+      audiosCount: 0,
+      dateRange: dateStr,
+      errors: [],
+      postSummaries: []
+    });
 
     // Ensure session is active
     await AuthManager.ensureLogin("✅ 扫码登录成功！正在开始抓取指定日期数据，请稍候...");
@@ -1213,10 +1474,16 @@ export class WeiboScraper {
         }
       }
       
-      return { success: true, message: `成功完成对 ${displayName} 在日期 ${dateStr} 的定向爬取。` };
+      const durationMs = Date.now() - startTime;
+      const message = this.generateDateSummaryMessage(uid, dateStr, durationMs);
+      return { success: true, message };
     } catch (err: any) {
       logger.error(`定向日期爬取失败:`, err);
-      return { success: false, message: `定向爬取日期数据失败: ${err.message || err}` };
+      const durationMs = Date.now() - startTime;
+      return {
+        success: false,
+        message: `定向爬取 ${displayName} 在日期 ${dateStr} 失败: ${err.message || err} (耗时: ${this.formatDuration(durationMs)})`
+      };
     }
   }
 }

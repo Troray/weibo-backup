@@ -124,6 +124,8 @@ function updateConfigInMemory(key: string, value: string): void {
     case 'LOGIN_MODE': conf.LOGIN_MODE = value; break;
     case 'HEADLESS': conf.HEADLESS = parseBool(value); break;
     case 'STATE_FILE': conf.STATE_FILE = value; break;
+    case 'WEIBO_SESSION_REFRESH_ENABLED': conf.WEIBO_SESSION_REFRESH_ENABLED = parseBool(value); break;
+    case 'WEIBO_SESSION_REFRESH_INTERVAL': conf.WEIBO_SESSION_REFRESH_INTERVAL = parseNum(value); break;
     
     case 'TELEGRAM_BOT_TOKEN': conf.TELEGRAM_BOT_TOKEN = value || undefined; break;
     case 'TELEGRAM_CHAT_ID': conf.TELEGRAM_CHAT_ID = value || undefined; break;

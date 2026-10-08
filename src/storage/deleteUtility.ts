@@ -302,6 +302,7 @@ export async function deletePostData(urlOrBidOrMid: string): Promise<{ success: 
     return { success: false, message: `Invalid input: ${err.message}` };
   }
 
+  const startTime = Date.now();
   logger.info(`正在对微博 MID: ${mid} 初始化删除流程...`);
 
   let metadata: DeleteMetadata | null = null;
@@ -568,7 +569,26 @@ export async function deletePostData(urlOrBidOrMid: string): Promise<{ success: 
   // 8. Clean up empty directories
   cleanEmptyDirs(userDir, monthDir);
 
-  return { success: true, message: `成功删除微博 ${mid} 及其关联的数据库记录、CSV 行、Markdown 区块和媒体文件。` };
+  const durationSec = ((Date.now() - startTime) / 1000).toFixed(1);
+  let summary = `🗑️ 【单条微博物理清理完成报告】\n\n`;
+  summary += `🆔 目标微博 ID: ${mid}\n`;
+  if (metadata?.userName) {
+    summary += `👤 关联博主: ${metadata.userName}${metadata.uid ? ` (${metadata.uid})` : ''}\n`;
+  }
+  if (metadata?.postTime) {
+    summary += `📅 博文时间: ${metadata.postTime}\n`;
+  }
+  summary += `⏱️ 执行耗时: ${durationSec}s\n\n`;
+
+  summary += `📊 清理明细统计:\n`;
+  summary += `  📝 微博记录: 已从 Markdown / JSON / CSV 同步移除\n`;
+  summary += `  🖼️ 物理删除媒体: ${filesDeletedCount} 个本地文件\n`;
+  if (config.DB_TYPE) {
+    summary += `  🗄️ 数据库: 已同步执行物理删除\n`;
+  }
+
+  summary += `\n✨ 该条微博本地备份及关联资产已彻底清理完成！`;
+  return { success: true, message: summary };
 }
 
 /**
@@ -600,6 +620,7 @@ function findFirstJsonFileForUser(bloggerPath: string, uid: string): boolean {
  * Delete all post data for a specific date and blogger UID in an efficient batch operation
  */
 export async function deleteDateData(uid: string, dateStr: string): Promise<{ success: boolean; message: string }> {
+  const startTime = Date.now();
   // Resolve displayName (Nickname (UID) or just UID) for clearer logging
   let displayName = uid;
   try {
@@ -908,12 +929,12 @@ export async function deleteDateData(uid: string, dateStr: string): Promise<{ su
   }
 
   // 9. Batch delete DB records (One single query for comments and posts!)
+  let deletedComments = 0;
+  let deletedPosts = 0;
   if (config.DB_TYPE) {
     try {
       const db = getDb();
       const idArray = Array.from(postIds);
-      let deletedComments = 0;
-      let deletedPosts = 0;
       if (idArray.length > 0) {
         deletedComments = await db('comments').whereIn('post_id', idArray).delete();
         deletedPosts = await db('posts').whereIn('id', idArray).delete();
@@ -929,8 +950,37 @@ export async function deleteDateData(uid: string, dateStr: string): Promise<{ su
   // 10. Clean up empty directories
   cleanEmptyDirs(sanitizedUserDir, monthDir);
 
+  const durationSec = ((Date.now() - startTime) / 1000).toFixed(1);
+  let summary = `🗑️ 【定向日期物理清理完成报告】\n\n`;
+  summary += `👤 目标博主: ${displayName}\n`;
+  summary += `📅 清理日期: ${dateStr}\n`;
+  summary += `⏱️ 执行耗时: ${durationSec}s\n\n`;
+
+  summary += `📊 清理明细统计:\n`;
+  summary += `  📝 移除微博记录: ${postIds.size} 条\n`;
+  if (deletedComments > 0) {
+    summary += `  💬 移除关联评论: ${deletedComments} 条\n`;
+  }
+  summary += `  🖼️ 物理删除媒体: ${mediaDeletedCount} 个本地文件\n\n`;
+
+  summary += `📁 本地存储同步状态:\n`;
+  if (jsonPath) {
+    summary += `  📄 每日 JSON: ${fs.existsSync(jsonPath) ? '已更新' : '已删除'}\n`;
+  }
+  if (mdPath) {
+    summary += `  📝 每日 Markdown: ${fs.existsSync(mdPath) ? '已更新' : '已删除'}\n`;
+  }
+  if (postsCsvPath && fs.existsSync(postsCsvPath)) {
+    summary += `  📊 CSV 汇总: 已同步剔除该日期记录\n`;
+  }
+  if (config.DB_TYPE) {
+    summary += `  🗄️ 数据库: 已物理删除相关记录 (${deletedPosts} 条微博, ${deletedComments} 条评论)\n`;
+  }
+
+  summary += `\n✨ 指定日期数据及关联资产已彻底清理完成！`;
+
   return {
     success: true,
-    message: `成功批量删除 ${displayName} 在日期 ${dateStr} 的共计 ${postIds.size} 条微博及其关联数据与媒体文件。`
+    message: summary
   };
 }

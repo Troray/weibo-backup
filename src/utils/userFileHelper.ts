@@ -19,6 +19,15 @@ export function getUserFilePath(): string {
   return path.join(process.cwd(), 'userid.txt');
 }
 
+export function isDateOrTimestamp(val: string): boolean {
+  const v = val.trim();
+  if (!v) return false;
+  // Matches YYYY-MM-DD, YYYY-MM-DDTHH:mm:ss, YYYY/MM/DD, or unix timestamp (10-13 digits)
+  if (/^\d{4}[-/]\d{1,2}[-/]\d{1,2}/.test(v)) return true;
+  if (/^\d{10,13}$/.test(v)) return true;
+  return false;
+}
+
 export function readUsers(): UserEntry[] {
   const filePath = getUserFilePath();
   if (!fs.existsSync(filePath)) {
@@ -48,8 +57,27 @@ export function readUsers(): UserEntry[] {
         // A valid UID must be numeric
         if (/^\d+$/.test(firstPart)) {
           const uid = firstPart;
-          const name = parts[1]?.trim() || '';
-          const cursor = parts[2]?.trim() || '';
+          let name = '';
+          let cursor = '';
+
+          if (parts.length === 2) {
+            const secondPart = parts[1]?.trim() || '';
+            if (isDateOrTimestamp(secondPart)) {
+              cursor = secondPart;
+            } else {
+              name = secondPart;
+            }
+          } else if (parts.length >= 3) {
+            const p1 = parts[1]?.trim() || '';
+            const p2 = parts[2]?.trim() || '';
+            if (isDateOrTimestamp(p1) && !p2) {
+              cursor = p1;
+            } else {
+              name = p1;
+              cursor = p2;
+            }
+          }
+
           entries.push({ uid, name, cursor, isCommented });
           continue;
         }
@@ -74,20 +102,32 @@ export function writeUsers(entries: UserEntry[]): void {
         return entry.rawLine;
       }
       const prefix = entry.isCommented ? '#' : '';
-      const parts = [
-        `${prefix}${entry.uid}`,
-        entry.name || '',
-        entry.cursor || ''
-      ];
-      // Trim empty trailing parts to keep format clean
-      while (parts.length > 1 && !parts[parts.length - 1]) {
-        parts.pop();
+      let parts: string[];
+      if (!entry.name && entry.cursor) {
+        // Omit empty name column to keep clean 'UID | cursor' format
+        parts = [`${prefix}${entry.uid}`, entry.cursor];
+      } else {
+        parts = [
+          `${prefix}${entry.uid}`,
+          entry.name || '',
+          entry.cursor || ''
+        ];
+        // Trim empty trailing parts to keep format clean
+        while (parts.length > 1 && !parts[parts.length - 1]) {
+          parts.pop();
+        }
       }
       return parts.join(' | ');
     });
     
-    // Ensure final newline or keep as is
-    fs.writeFileSync(filePath, lines.join('\n'), 'utf8');
+    const tmpPath = `${filePath}.tmp`;
+    fs.writeFileSync(tmpPath, lines.join('\n'), 'utf8');
+    try {
+      fs.renameSync(tmpPath, filePath);
+    } catch {
+      fs.copyFileSync(tmpPath, filePath);
+      fs.unlinkSync(tmpPath);
+    }
   } catch (err) {
     logger.error(`Failed to write user file: ${filePath}`, err);
   }
