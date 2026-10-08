@@ -482,11 +482,13 @@ export class WeiboScraper {
         if (stats.postSummaries.length <= 2) {
           msg += `📋 抓取博文:\n`;
           for (const p of stats.postSummaries) {
-            const timePart = p.time ? `${p.time} ` : '';
-            const tag = p.isRetweet ? ' [转]' : '';
+            const parts: string[] = [];
+            if (p.time) parts.push(p.time);
+            if (p.isRetweet) parts.push('[转]');
+            parts.push(`(评 ${p.commentsCount})`);
             const cleanText = p.snippet ? p.snippet.replace(/\.+$/, '').trim() : '';
             const snippetStr = cleanText ? `: ${cleanText.slice(0, 36)}...` : '';
-            msg += `  • ${timePart}${tag}(评 ${p.commentsCount})${snippetStr}\n`;
+            msg += `  • ${parts.join(' ')}${snippetStr}\n`;
           }
         } else {
           const folderRelPath = path.join(config.OUTPUT_DIR, (realName || uid).replace(/[\\/:*?"<>|]/g, '_').trim());
@@ -550,15 +552,21 @@ export class WeiboScraper {
       msg += `  🖼️ 多媒体下载: 共 ${mediaTotal} 项 (图片: ${stats.imagesCount} | 视频: ${stats.videosCount} | 实况: ${stats.livePhotosCount} | 音频: ${stats.audiosCount})\n\n`;
 
       if (stats.postSummaries && stats.postSummaries.length > 0) {
+        const formatPostItem = (p: CrawlPostSummary) => {
+          const parts: string[] = [];
+          if (p.time) parts.push(p.time);
+          if (p.isRetweet) parts.push('[转]');
+          const mediaStr = p.mediaCount > 0 ? ` 媒 ${p.mediaCount}` : '';
+          parts.push(`(评 ${p.commentsCount}${mediaStr})`);
+          const cleanText = p.snippet ? p.snippet.replace(/\.+$/, '').trim() : '';
+          const snippetStr = cleanText ? `: ${cleanText.slice(0, 38)}...` : '';
+          return `  • ${parts.join(' ')}${snippetStr}`;
+        };
+
         if (stats.postSummaries.length <= 3) {
           msg += `📋 博文抓取清单 (${stats.postSummaries.length} 条):\n`;
           for (const p of stats.postSummaries) {
-            const timePart = p.time ? `${p.time} ` : '';
-            const tag = p.isRetweet ? ' [转]' : '';
-            const mediaStr = p.mediaCount > 0 ? ` 媒 ${p.mediaCount}` : '';
-            const cleanText = p.snippet ? p.snippet.replace(/\.+$/, '').trim() : '';
-            const snippetStr = cleanText ? `: ${cleanText.slice(0, 38)}...` : '';
-            msg += `  • ${timePart}${tag}(评 ${p.commentsCount}${mediaStr})${snippetStr}\n`;
+            msg += `${formatPostItem(p)}\n`;
           }
         } else {
           // Sort by commentsCount descending to show top 2 most engaging posts
@@ -568,12 +576,7 @@ export class WeiboScraper {
 
           msg += `🔥 重点博文 (共 ${stats.postSummaries.length} 条，精选互动 Top 2):\n`;
           for (const p of topPosts) {
-            const timePart = p.time ? `${p.time} ` : '';
-            const tag = p.isRetweet ? ' [转]' : '';
-            const mediaStr = p.mediaCount > 0 ? ` 媒 ${p.mediaCount}` : '';
-            const cleanText = p.snippet ? p.snippet.replace(/\.+$/, '').trim() : '';
-            const snippetStr = cleanText ? `: ${cleanText.slice(0, 38)}...` : '';
-            msg += `  • ${timePart}${tag}(评 ${p.commentsCount}${mediaStr})${snippetStr}\n`;
+            msg += `${formatPostItem(p)}\n`;
           }
           msg += `  ℹ️ 其余 ${remainingCount} 条博文已完整归档至本地\n`;
         }
