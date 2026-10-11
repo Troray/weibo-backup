@@ -21,6 +21,8 @@ export interface ScraperConfig {
   STATE_FILE: string; // state.json 存储路径
   WEIBO_SESSION_REFRESH_ENABLED: boolean; // 是否启用定期 Session 自动续期心跳
   WEIBO_SESSION_REFRESH_INTERVAL: number; // 守护模式下自动续期检查间隔（毫秒，默认 12 小时）
+  WEIBO_SAVESTATE: number; // 微博通行证 SSO 保持登录天数，默认 30 天
+  LOGIN_QR_TIMEOUT: number; // 扫码登录等待授权超时时间（毫秒），默认 300000 (5分钟)
   
   // 机器人通知配置（以 Telegram 为例，可根据需要扩展）
   TELEGRAM_BOT_TOKEN?: string;
@@ -119,6 +121,22 @@ export const config: ScraperConfig = {
     }
     const num = parseInt(raw, 10);
     return isNaN(num) ? 12 * 60 * 60 * 1000 : num;
+  })(),
+  WEIBO_SAVESTATE: getEnvNum('WEIBO_SAVESTATE', 30),
+  LOGIN_QR_TIMEOUT: (() => {
+    const raw = getEnvStr('LOGIN_QR_TIMEOUT');
+    if (!raw) return 5 * 60 * 1000;
+    const match = raw.trim().match(/^(\d+(?:\.\d+)?)\s*(h|m|s|ms)?$/i);
+    if (match) {
+      const val = parseFloat(match[1]);
+      const unit = (match[2] || 'm').toLowerCase();
+      if (unit === 'h') return Math.floor(val * 3600 * 1000);
+      if (unit === 'm') return Math.floor(val * 60 * 1000);
+      if (unit === 's') return Math.floor(val * 1000);
+      if (unit === 'ms') return Math.floor(val);
+    }
+    const num = parseInt(raw, 10);
+    return isNaN(num) ? 5 * 60 * 1000 : num;
   })(),
   
   TELEGRAM_BOT_TOKEN: getEnvStr('TELEGRAM_BOT_TOKEN'),

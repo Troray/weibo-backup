@@ -5,6 +5,7 @@ import { config } from '../config';
 import { logger } from '../utils/logger';
 import { CookieJar, WeiboCookie } from '../utils/cookieHelper';
 import { getAxiosProxyConfig } from '../utils/proxyHelper';
+import { Notifier } from '../utils/notifier';
 import { SessionMetadata, SessionStateV2, SessionExpiredError } from './types';
 
 export class SessionManager {
@@ -192,8 +193,8 @@ export class SessionManager {
       return true;
     }
 
-    logger.info('[Auth] 正在向微博服务器进行会话在线有效性校验 (ajax/config)...');
-    const testUrl = 'https://weibo.com/ajax/config';
+    logger.info('[Auth] 正在向微博服务器进行会话在线有效性校验 (ajax/profile/detail)...');
+    const testUrl = 'https://weibo.com/ajax/profile/detail';
 
     try {
       const response = await axios({
@@ -223,19 +224,22 @@ export class SessionManager {
       }
 
       if (data) {
-        if (data.isLogin === false || data.ok === -100 || data.ok === 0) {
-          logger.warn(`[Auth] 在线校验未通过：服务端明确返回未登录状态 (ok: ${data.ok}, isLogin: ${data.isLogin})。`);
+        if (data.ok === -100 || (typeof data.url === 'string' && data.url.includes('login.php'))) {
+          logger.warn(`[Auth] 在线校验未通过：服务端明确返回未登录状态 (ok: ${data.ok})。`);
           return false;
         }
-        if (typeof data.url === 'string' && (data.url.includes('login.php') || data.url.includes('passport.weibo.com'))) {
-          logger.warn(`[Auth] 在线校验未通过：接口指示需要重新登录 (跳转 URL: ${data.url})。`);
-          return false;
+
+        if (data.ok === 1 && data.data) {
+          const uidMatch = typeof data.data.verified_url === 'string' ? data.data.verified_url.match(/uid=(\d+)/) : null;
+          if (uidMatch && uidMatch[1]) {
+            this.metadata.uid = uidMatch[1];
+          }
         }
       }
 
       this.metadata.lastValidatedAt = Date.now();
       this.save();
-      logger.info('[Auth] 在线校验成功：微博服务端会话依然有效。');
+      logger.info(`[Auth] 在线校验成功：微博服务端会话依然有效${this.metadata.uid ? ` (UID: ${this.metadata.uid})` : ''}。`);
       return true;
 
     } catch (err: any) {
@@ -247,8 +251,8 @@ export class SessionManager {
         return false;
       }
 
-      // Secondary fallback check on s.weibo.com in case ajax/config is affected by transient WAF or network
-      logger.warn(`[Auth] 主校验接口 (ajax/config) 返回异常 [${status || err.message}]，尝试备用校验 (s.weibo.com)...`);
+      // Secondary fallback check on s.weibo.com in case ajax/profile/detail is affected by transient WAF or network
+      logger.warn(`[Auth] 主校验接口 (ajax/profile/detail) 返回异常 [${status || err.message}]，尝试备用校验 (s.weibo.com)...`);
       try {
         const fallbackUrl = 'https://s.weibo.com/weibo?q=test';
         const fallbackRes = await axios({
@@ -295,8 +299,8 @@ export class SessionManager {
   }
 
   /**
-   * Active renewal / refresh of session via lightweight profile info endpoint.
-   * This updates rolling session cookies on Weibo server.
+   * Health check and keep-alive for session.
+   * Validates session with Weibo and records freshness timestamp.
    */
   public async refresh(): Promise<boolean> {
     this.ensureLoaded();
@@ -306,63 +310,16 @@ export class SessionManager {
       return false;
     }
 
-    logger.info('[Auth] 正在向微博发送轻量心跳/续期请求 (ajax/profile/info)...');
-    const refreshUrl = 'https://weibo.com/ajax/profile/info?custom=1';
+    logger.info('[Auth] 正在向微博发送轻量心跳并校验会话有效性 (ajax/profile/detail)...');
+    const isValid = await this.validate(true);
 
-    try {
-      const response = await axios({
-        url: refreshUrl,
-        method: 'GET',
-        proxy: getAxiosProxyConfig(),
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Referer': 'https://weibo.com/',
-          'Accept': 'application/json, text/plain, */*',
-          'Cookie': this.getCookieHeader(refreshUrl)
-        },
-        timeout: 10000,
-        maxRedirects: 5,
-        validateStatus: (status) => status >= 200 && status < 400
-      });
-
-      this.processResponse(response, refreshUrl);
-
-      const finalUrl = response.request?.res?.responseUrl || refreshUrl;
-      const data = response.data;
-
-      if (finalUrl.includes('passport.weibo.com') || finalUrl.includes('login.php')) {
-        logger.warn('[Auth] 会话续期失败：服务器将请求重定向至登录页。');
-        return false;
-      }
-
-      if (data) {
-        if (data.ok === -100 || (typeof data.url === 'string' && data.url.includes('login.php'))) {
-          logger.warn('[Auth] 会话续期失败：微博服务器指示登录态已失效。');
-          return false;
-        }
-
-        if (data.ok === 1 && data.data?.user) {
-          const user = data.data.user;
-          this.metadata.uid = String(user.idstr || user.id || '');
-          this.metadata.screenName = String(user.screen_name || '');
-          this.metadata.lastRefreshAt = Date.now();
-          this.metadata.lastValidatedAt = Date.now();
-          this.save();
-          logger.info(`[Auth] 会话续期成功！当前登录博主: ${this.metadata.screenName || this.metadata.uid}，Session 活跃期已成功顺延。`);
-          return true;
-        }
-      }
-
-      // If status 200 and no explicit error, still consider refreshed
+    if (isValid) {
       this.metadata.lastRefreshAt = Date.now();
-      this.metadata.lastValidatedAt = Date.now();
       this.save();
-      logger.info('[Auth] 会话轻量心跳发送完毕，凭据已刷新。');
+      logger.info(`[Auth] 会话心跳检查成功！当前博主: ${this.metadata.screenName || this.metadata.uid || '已鉴权'}，Session 状态正常。`);
       return true;
-
-    } catch (err: any) {
-      const status = err.response?.status;
-      logger.warn(`[Auth] 会话续期请求遇到异常 (${status || err.message})，维持既有会话状态。`);
+    } else {
+      logger.warn('[Auth] 会话心跳检测失败：微博服务器指示登录态已失效。');
       return false;
     }
   }
@@ -382,7 +339,13 @@ export class SessionManager {
     this.keepAliveTimer = setInterval(async () => {
       try {
         logger.info('[Auth] 定时触发 Session 自动续期任务...');
-        await this.refresh();
+        const success = await this.refresh();
+        if (!success) {
+          logger.warn('[Auth] 定时自动续期检测到会话已失效，正在发送预警通知...');
+          try {
+            await Notifier.sendText('⚠️ 【微博登录态失效预警】\n\n检测到当前微博登录会话已失效。请在 Telegram 发送 /login 重新扫码，避免影响后续夜间定时爬取任务。');
+          } catch {}
+        }
       } catch (err: any) {
         logger.error(`[Auth] 定时自动续期任务执行出错: ${err.message}`);
       }

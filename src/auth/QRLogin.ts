@@ -154,10 +154,10 @@ export class QRLogin {
         console.log(`>>> 二维码已通过机器人发送。截图保存在 ${tempQrPath} <<<`);
       }
 
-      logger.info('[QRLogin] 正在等待用户扫码授权（限时 2 分钟）...');
+      const timeoutMs = config.LOGIN_QR_TIMEOUT || 300000;
+      logger.info(`[QRLogin] 正在等待用户扫码授权（限时 ${Math.round(timeoutMs / 60000)} 分钟）...`);
       let alt = '';
       const pollStartTime = Date.now();
-      const timeoutMs = 120000;
 
       while (Date.now() - pollStartTime < timeoutMs) {
         const checkUrl = `https://login.sina.com.cn/sso/qrcode/check?entry=miniblog&qrid=${qrid}&callback=STK_${Date.now()}`;
@@ -197,7 +197,8 @@ export class QRLogin {
       }
 
       logger.info('[QRLogin] 正在与 SSO 登录系统交换安全令牌并同步会话...');
-      const loginUrl = `https://login.sina.com.cn/sso/login.php?entry=miniblog&crossdomain=1&gateway=1&savestate=7&alt=${alt}`;
+      const savestate = config.WEIBO_SAVESTATE || 30;
+      const loginUrl = `https://login.sina.com.cn/sso/login.php?entry=miniblog&crossdomain=1&gateway=1&savestate=${savestate}&alt=${alt}`;
 
       const extractAndVisitTickets = async (html: string) => {
         const cleanHtml = html.replace(/\\/g, '');
