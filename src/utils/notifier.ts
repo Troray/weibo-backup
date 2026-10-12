@@ -2,39 +2,41 @@ import { config } from '../config';
 import { logger } from './logger';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
+import { htmlToPlainTextOrMarkdown } from './htmlHelper';
 
 export class Notifier {
   /**
    * Send a text message to configured notification channels
    */
   static async sendText(text: string, parseMode?: 'Markdown' | 'HTML'): Promise<void> {
-    logger.info(`[Notification] ${text}`);
+    const plainOrMarkdown = htmlToPlainTextOrMarkdown(text);
+    logger.info(`[Notification] ${plainOrMarkdown}`);
 
     const promises: Promise<void>[] = [];
 
-    // 1. Telegram
+    // 1. Telegram (Supports native HTML formatting like <blockquote expandable>)
     if (config.TELEGRAM_BOT_TOKEN && config.TELEGRAM_CHAT_ID) {
       promises.push(this.sendTelegramText(text, parseMode));
     }
 
-    // 2. DingTalk
+    // 2. DingTalk (Formatted with clean Markdown)
     if (config.DINGTALK_WEBHOOK) {
-      promises.push(this.sendDingTalkText(text));
+      promises.push(this.sendDingTalkText(plainOrMarkdown));
     }
 
-    // 3. WeChat Work
+    // 3. WeChat Work (Formatted with clean Markdown)
     if (config.WECHAT_WORK_WEBHOOK) {
-      promises.push(this.sendWeChatWorkText(text));
+      promises.push(this.sendWeChatWorkText(plainOrMarkdown));
     }
 
-    // 4. Feishu (飞书)
+    // 4. Feishu (飞书) (Formatted with clean Markdown)
     if (config.FEISHU_WEBHOOK) {
-      promises.push(this.sendFeishuLarkText(config.FEISHU_WEBHOOK, config.FEISHU_SECRET, text, 'Feishu'));
+      promises.push(this.sendFeishuLarkText(config.FEISHU_WEBHOOK, config.FEISHU_SECRET, plainOrMarkdown, 'Feishu'));
     }
 
-    // 5. Lark (飞书国际版)
+    // 5. Lark (飞书国际版) (Formatted with clean Markdown)
     if (config.LARK_WEBHOOK) {
-      promises.push(this.sendFeishuLarkText(config.LARK_WEBHOOK, config.LARK_SECRET, text, 'Lark'));
+      promises.push(this.sendFeishuLarkText(config.LARK_WEBHOOK, config.LARK_SECRET, plainOrMarkdown, 'Lark'));
     }
 
     await Promise.allSettled(promises);
@@ -80,12 +82,19 @@ export class Notifier {
     try {
       const apiBase = config.TELEGRAM_API_BASE || 'https://api.telegram.org';
       const url = `${apiBase}/bot${config.TELEGRAM_BOT_TOKEN}/sendMessage`;
+      
+      let mode = parseMode;
+      // Auto-detect HTML mode if text contains HTML formatting tags
+      if (!mode && /<\/?(b|i|u|s|blockquote|code|pre|a)\b/i.test(text)) {
+        mode = 'HTML';
+      }
+
       const body: any = {
         chat_id: config.TELEGRAM_CHAT_ID,
         text: text,
       };
-      if (parseMode) {
-        body.parse_mode = parseMode;
+      if (mode) {
+        body.parse_mode = mode;
       }
       const response = await fetch(url, {
         method: 'POST',
@@ -95,7 +104,27 @@ export class Notifier {
       });
 
       if (!response.ok) {
-        logger.error(`Telegram sendText failed with status ${response.status}: ${await response.text()}`);
+        const errText = await response.text();
+        logger.warn(`Telegram sendText (parse_mode=${mode}) failed with status ${response.status}: ${errText}`);
+
+        // Defensive fallback: if sending with parseMode failed (e.g. malformed tag 400), retry with plain text
+        if (mode) {
+          logger.info('Telegram 通知使用 HTML/Markdown 格式发送未成功，正在自动回退为纯文本模式重新发送...');
+          const fallbackRes = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: config.TELEGRAM_CHAT_ID,
+              text: htmlToPlainTextOrMarkdown(text),
+            }),
+            signal: AbortSignal.timeout(15000),
+          });
+          if (!fallbackRes.ok) {
+            logger.error(`Telegram 回退纯文本模式发送亦失败 (${fallbackRes.status}): ${await fallbackRes.text()}`);
+          } else {
+            logger.info('Telegram 回退纯文本通知已成功送达。');
+          }
+        }
       } else {
         logger.info('Telegram text notification sent successfully.');
       }
