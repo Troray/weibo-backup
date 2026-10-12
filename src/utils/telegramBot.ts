@@ -21,6 +21,7 @@ import { AuthManager } from '../auth/AuthManager';
 import { deletePostData } from '../storage/deleteUtility';
 import * as fs from 'fs';
 import * as path from 'path';
+import { cleanupActiveHookProcess } from './postScriptRunner';
 
 export class TelegramBot {
   private static running = false;
@@ -89,6 +90,7 @@ export class TelegramBot {
    */
   static stop(): void {
     this.running = false;
+    cleanupActiveHookProcess();
     logger.info("Telegram Bot listener daemon stopped.");
   }
 
@@ -212,7 +214,8 @@ export class TelegramBot {
 • 自动定时：${config.SCHEDULE_CRAWL_TIME || '未配置'}
 • 存储格式：${config.SAVE_TYPES.join(', ')}
 • 数据库类型：${config.DB_TYPE || "未配置"}
-• 输出目录：${config.OUTPUT_DIR}`;
+• 输出目录：${config.OUTPUT_DIR}
+• 后置脚本：${config.POST_SCRIPT_COMMAND ? `🟢 已配置 (${path.basename(config.POST_SCRIPT_COMMAND)} | 触发: ${config.POST_SCRIPT_TRIGGER})` : '🔴 未配置'}`;
 
     await Notifier.sendText(statusMsg);
   }
@@ -278,7 +281,7 @@ export class TelegramBot {
     (async () => {
       try {
         const scraper = new WeiboScraper();
-        const summary = await scraper.run();
+        const summary = await scraper.run('TG_BOT');
         await closeDb();
         await Notifier.sendText(summary);
       } catch (err: any) {
@@ -534,9 +537,9 @@ export class TelegramBot {
         const scraper = new WeiboScraper();
         let res;
         if (isDate) {
-          res = await scraper.crawlDateForUser(resolvedUid, target);
+          res = await scraper.crawlDateForUser(resolvedUid, target, 'TG_BOT');
         } else {
-          res = await scraper.crawlSinglePost(target);
+          res = await scraper.crawlSinglePost(target, 'TG_BOT');
         }
 
         if (res.success) {
@@ -704,7 +707,7 @@ export class TelegramBot {
             (async () => {
               try {
                 const scraper = new WeiboScraper();
-                const summary = await scraper.run();
+                const summary = await scraper.run('SCHEDULE');
                 await closeDb();
                 await Notifier.sendText(`⏰ [定时任务同步成功]\n\n${summary}`);
               } catch (err: any) {
