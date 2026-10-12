@@ -27,10 +27,16 @@ export const logger = winston.createLogger({
     }),
     new winston.transports.File({ 
       filename: path.join(logDir, 'error.log'), 
-      level: 'error' 
+      level: 'error',
+      maxsize: 10 * 1024 * 1024, // 10MB
+      maxFiles: 5,
+      tailable: true
     }),
     new winston.transports.File({ 
-      filename: path.join(logDir, 'combined.log') 
+      filename: path.join(logDir, 'combined.log'),
+      maxsize: 20 * 1024 * 1024, // 20MB
+      maxFiles: 5,
+      tailable: true
     })
   ]
 });

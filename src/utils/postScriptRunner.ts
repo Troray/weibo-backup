@@ -78,6 +78,40 @@ export function cleanupActiveHookProcess(): void {
 }
 
 /**
+ * 追加写入后置脚本执行日志，并执行单文件 10MB 自动轮转 (保留最近 3 份历史副本)
+ */
+function appendHookLog(logsDir: string, entry: string): void {
+  try {
+    if (!fs.existsSync(logsDir)) {
+      fs.mkdirSync(logsDir, { recursive: true });
+    }
+    const logPath = path.join(logsDir, 'post-hook.log');
+    if (fs.existsSync(logPath)) {
+      try {
+        const stats = fs.statSync(logPath);
+        if (stats.size >= 10 * 1024 * 1024) {
+          const maxFiles = 3;
+          for (let i = maxFiles - 1; i >= 1; i--) {
+            const current = path.join(logsDir, `post-hook.${i}.log`);
+            const next = path.join(logsDir, `post-hook.${i + 1}.log`);
+            if (fs.existsSync(current)) {
+              if (i === maxFiles - 1) {
+                try { fs.unlinkSync(current); } catch {}
+              } else {
+                try { fs.renameSync(current, next); } catch {}
+              }
+            }
+          }
+          const firstBackup = path.join(logsDir, 'post-hook.1.log');
+          try { fs.renameSync(logPath, firstBackup); } catch {}
+        }
+      } catch {}
+    }
+    fs.appendFileSync(logPath, entry, 'utf8');
+  } catch {}
+}
+
+/**
  * 智能解析外部脚本命令与解释器
  */
 function resolveScriptCommand(rawCmd: string): string {
@@ -323,12 +357,11 @@ export async function executePostScript(context: HookContext): Promise<HookExecu
         const stderrStr = Buffer.concat(stderrChunks).toString('utf8');
         const rawOutput = (stdoutStr + (stderrStr ? `\n[STDERR]\n${stderrStr}` : '')).trim();
 
-        // 写入审计日志文件
+        // 写入审计日志文件（带 10MB 自动滚动轮转）
         try {
           const logsDir = path.join(projectRoot, 'logs');
-          if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
           const logEntry = `\n[${new Date().toISOString()}] CMD: ${fullCommand} | CODE: ${code} | DURATION: ${durationMs}ms\n${rawOutput}\n--------------------`;
-          fs.appendFileSync(path.join(logsDir, 'post-hook.log'), logEntry, 'utf8');
+          appendHookLog(logsDir, logEntry);
         } catch {}
 
         if (isTimedOut) {
