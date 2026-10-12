@@ -12,62 +12,20 @@ import { resolveMid } from '../utils/base62';
 import { sessionManager } from '../auth/SessionManager';
 import { SessionExpiredError } from '../auth/types';
 import { getAxiosProxyConfig } from '../utils/proxyHelper';
-import { readUsers, writeUsers } from '../utils/userFileHelper';
+import { 
+  readUsers, 
+  writeUsers, 
+  getUserFilePath, 
+  isUserListFile, 
+  getActiveUids,
+  getBeijingDateParts, 
+  getTodayString, 
+  formatToMinute, 
+  parseCursorToTimestamp 
+} from '../utils/userFileHelper';
 
 // Re-export for backward compatibility
 export { SessionExpiredError };
-
-function getBeijingDateParts(input: Date | number) {
-  const ts = typeof input === 'number' ? input : input.getTime();
-  const beijingDate = new Date(ts + 8 * 3600 * 1000);
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const year = beijingDate.getUTCFullYear();
-  const month = pad(beijingDate.getUTCMonth() + 1);
-  const day = pad(beijingDate.getUTCDate());
-  const hours = pad(beijingDate.getUTCHours());
-  const minutes = pad(beijingDate.getUTCMinutes());
-  const seconds = pad(beijingDate.getUTCSeconds());
-  return {
-    year,
-    month,
-    day,
-    hours,
-    minutes,
-    seconds,
-    dateStr: `${year}-${month}-${day}`,
-    minuteStr: `${year}-${month}-${day} ${hours}:${minutes}`,
-    isoStr: `${year}-${month}-${day}T${hours}:${minutes}:${seconds}`
-  };
-}
-
-function getTodayString(): string {
-  return getBeijingDateParts(Date.now()).dateStr;
-}
-
-function formatToMinute(input: Date | number): string {
-  return getBeijingDateParts(input).minuteStr;
-}
-
-function parseCursorToTimestamp(str: string): number {
-  const trimmed = str.trim();
-  if (!trimmed) return 0;
-  if (/^\d{10,13}$/.test(trimmed)) {
-    const num = parseInt(trimmed, 10);
-    return trimmed.length === 10 ? num * 1000 : num;
-  }
-  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
-    const ts = Date.parse(`${trimmed}T00:00:00+08:00`);
-    if (!isNaN(ts)) return ts;
-  }
-  if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$/.test(trimmed)) {
-    const iso = trimmed.replace(' ', 'T');
-    const fullIso = iso.split(':').length === 2 ? `${iso}:00` : iso;
-    const ts = Date.parse(`${fullIso}+08:00`);
-    if (!isNaN(ts)) return ts;
-  }
-  const fallback = Date.parse(trimmed);
-  return isNaN(fallback) ? 0 : fallback;
-}
 
 function getDateRange(startDate: string, endDate: string, order: 'asc' | 'desc'): string[] {
   const days: string[] = [];
@@ -257,6 +215,7 @@ export class WeiboScraper {
   }
 
   private getBloggerName(uid: string): string {
+    if (!isUserListFile()) return '';
     try {
       const users = readUsers();
       const match = users.find((u: any) => u.uid === uid);
@@ -316,14 +275,7 @@ export class WeiboScraper {
     await this.pipeline.initialize();
 
     // 2. Resolve UIDs
-    let uids: string[] = [];
-    const list = config.USER_ID_LIST.trim();
-    if (list.toLowerCase().endsWith('.txt')) {
-      const users = readUsers();
-      uids = users.filter((u: any) => !u.isCommented && u.uid).map((u: any) => u.uid!);
-    } else {
-      uids = list.split(',').map(s => s.trim()).filter(Boolean);
-    }
+    const uids = getActiveUids();
 
     if (uids.length === 0) {
       const errMsg = '未从配置中解析出任何微博 UID。USER_ID_LIST 为空或无效。退出运行。';
@@ -337,7 +289,10 @@ export class WeiboScraper {
     // 3. Queue target URLs
     this.requestQueue = [];
 
+    const allUsers = isUserListFile() ? readUsers() : [];
+
     for (const uid of uids) {
+      const userEntry = allUsers.find((u: any) => u.uid === uid && !u.isCommented);
       const cursor = this.getCursorForUser(uid);
       const bloggerName = (await this.getScreenName(uid)) || uid;
 
@@ -348,7 +303,8 @@ export class WeiboScraper {
       const now = new Date();
       const currentNowStr = formatToMinute(now);
       const todayStr = getTodayString();
-      const effectiveEndDate = config.END_DATE || todayStr;
+      const userEndDate = userEntry?.endDate;
+      const effectiveEndDate = userEndDate || config.END_DATE || todayStr;
 
       if (cursor > 0) {
         const bp = getBeijingDateParts(cursor);
@@ -359,8 +315,9 @@ export class WeiboScraper {
         startDateTimeStr = `${config.START_DATE} 00:00`;
       }
 
-      if (config.END_DATE && config.END_DATE !== todayStr) {
-        endDateTimeStr = `${config.END_DATE} 23:59`;
+      const configuredEndDate = userEndDate || config.END_DATE;
+      if (configuredEndDate && configuredEndDate !== todayStr) {
+        endDateTimeStr = `${configuredEndDate} 23:59`;
       } else {
         endDateTimeStr = currentNowStr;
       }
@@ -388,7 +345,6 @@ export class WeiboScraper {
       });
 
       if (startDateStr) {
-        const effectiveEndDate = config.END_DATE || getTodayString();
         const days = getDateRange(startDateStr, effectiveEndDate, config.DATE_ORDER);
         logger.info(`博主 ${bloggerName} (${uid}) 的日期区间模式: ${startDateStr} → ${effectiveEndDate} (${config.DATE_ORDER})，共计 ${days.length} 天进行抓取`);
 
@@ -403,7 +359,7 @@ export class WeiboScraper {
         const profileUrl = `https://weibo.com/u/${uid}`;
         this.requestQueue.push({
           url: profileUrl,
-          userData: { label: 'PROFILE_PAGE', uid, cursor }
+          userData: { label: 'PROFILE_PAGE', uid, cursor, effectiveEndDate }
         });
       }
     }
@@ -736,9 +692,10 @@ export class WeiboScraper {
 
     // 仅当抓取正常结束（到达末尾或遇到已知游标）时才推进游标，严防因网络异常导致游标过早跳变而漏抓老微博
     if (crawlCompletedNormally) {
+      const targetEnd = userData?.effectiveEndDate || config.END_DATE;
       let cursorTimestamp = latestPostTimestamp > 0 ? latestPostTimestamp : Date.now();
-      if (config.END_DATE && config.END_DATE !== getTodayString()) {
-        const endTs = Date.parse(`${config.END_DATE}T23:59:59+08:00`);
+      if (targetEnd && targetEnd !== getTodayString()) {
+        const endTs = Date.parse(`${targetEnd}T23:59:59+08:00`);
         if (!isNaN(endTs)) {
           cursorTimestamp = endTs;
         }
@@ -907,9 +864,10 @@ export class WeiboScraper {
       logger.info(`已完成日期 ${currentDay} 的所有搜索页爬取。`);
       if (!isTargeted) {
         let cursorTimestamp = Date.now();
-        if (config.END_DATE && currentDay === config.END_DATE) {
-          if (config.END_DATE !== getTodayString()) {
-            const endTs = Date.parse(`${config.END_DATE}T23:59:59+08:00`);
+        const targetEnd = effectiveEndDate || config.END_DATE;
+        if (targetEnd && currentDay === targetEnd) {
+          if (targetEnd !== getTodayString()) {
+            const endTs = Date.parse(`${targetEnd}T23:59:59+08:00`);
             if (!isNaN(endTs)) {
               cursorTimestamp = endTs;
             }
@@ -1173,6 +1131,7 @@ export class WeiboScraper {
   // --- Cursor Management (Incremental Sync) ---
 
   private getCursorForUser(uid: string): number {
+    if (!isUserListFile()) return 0;
     try {
       const users = readUsers();
       const match = users.find((u: any) => u.uid === uid && !u.isCommented);
@@ -1186,6 +1145,7 @@ export class WeiboScraper {
   }
 
   private updateCursorForUser(uid: string, name: string, timestamp: number): void {
+    if (!isUserListFile()) return;
     try {
       const currentCursor = this.getCursorForUser(uid);
       if (currentCursor > 0 && timestamp <= currentCursor) {
@@ -1213,10 +1173,11 @@ export class WeiboScraper {
   }
 
   private saveBloggerNameToUserFile(uid: string, name: string): void {
+    if (!isUserListFile()) return;
     try {
       const users = readUsers();
       const user = users.find((u: any) => u.uid === uid);
-      if (user) {
+      if (user && !user.name) {
         user.name = name;
         writeUsers(users);
         logger.info(`已成功将博主 ${name} (${uid}) 的昵称持久化保存至用户文件`);

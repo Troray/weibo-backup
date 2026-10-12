@@ -1,6 +1,18 @@
 import { config, getMediaDownloadSummary } from '../config';
 import { logger } from './logger';
-import { readUsers, addUser, deleteUser, commentUser, setUserCursor } from './userFileHelper';
+import { 
+  readUsers, 
+  addUser, 
+  deleteUser, 
+  commentUser, 
+  setUserCursor, 
+  setUserEndDate, 
+  getCrawlModeSummary, 
+  isUserListFile, 
+  getActiveUids, 
+  getUserFilePath, 
+  getBloggerDisplayName 
+} from './userFileHelper';
 import { readEnv, writeEnv } from './envHelper';
 import { WeiboScraper } from '../scraper/WeiboScraper';
 import { closeDb } from '../storage/db';
@@ -8,6 +20,7 @@ import { Notifier } from './notifier';
 import { AuthManager } from '../auth/AuthManager';
 import { deletePostData } from '../storage/deleteUtility';
 import * as fs from 'fs';
+import * as path from 'path';
 
 export class TelegramBot {
   private static running = false;
@@ -22,17 +35,12 @@ export class TelegramBot {
     this.running = true;
 
     logger.info("Starting Telegram Bot listener daemon...");
-    let activeDesc = '';
-    try {
-      const users = readUsers().filter(u => !u.isCommented && u.uid);
-      activeDesc = `已启用 ${users.length} 位博主 (${users.map(u => u.name || u.uid).join(', ')})`;
-    } catch {}
+    const crawlInfo = getCrawlModeSummary();
 
     let welcomeMsg = `🤖 【微博爬虫守护进程已启动】\n\n`;
     welcomeMsg += `• 运行模式: Telegram 交互式守护进程\n`;
-    if (activeDesc) {
-      welcomeMsg += `• 监控博主: ${activeDesc}\n`;
-    }
+    welcomeMsg += `• 监控博主: ${crawlInfo.bloggerStats} (${crawlInfo.usersDesc})\n`;
+    welcomeMsg += `• 抓取模式: ${crawlInfo.modeDesc}\n`;
     if (config.SCHEDULE_CRAWL_TIME) {
       welcomeMsg += `• 定时同步: 北京时间 ${config.SCHEDULE_CRAWL_TIME}\n`;
     }
@@ -175,6 +183,7 @@ export class TelegramBot {
 • \`/user disable\` <UID> - 暂时禁用（注释掉）指定博主。
 • \`/user enable\` <UID> - 重新启用指定博主。
 • \`/user date\` <UID> <YYYY-MM-DD> - 为指定博主设置自定义的同步起点日期游标。
+• \`/user enddate\` <UID> <YYYY-MM-DD|clear> - 设置或清除指定博主的自定义结束时间。
 
 环境变量（.env）配置管理：
 • /env list - 显示所有环境变量配置值。
@@ -188,20 +197,15 @@ export class TelegramBot {
     const stateExists = fs.existsSync(config.STATE_FILE);
     const sessionExpired = stateExists ? await AuthManager.isSessionExpired() : true;
 
-    let bloggerStats = '未配置';
-    try {
-      const users = readUsers();
-      const active = users.filter((u: any) => !u.isCommented && u.uid);
-      bloggerStats = `已启用 ${active.length} 位 / 共 ${users.filter((u: any) => u.uid).length} 位`;
-    } catch {}
+    const crawlInfo = getCrawlModeSummary();
 
     const statusMsg = `📊 【微博爬虫当前运行状态与配置】
 
 • 登录状态：${stateExists ? (sessionExpired ? "❌ 登录已过期" : "✅ 已登录") : "❌ 未登录 (无 state.json)"}
 • 爬取状态：${this.isCrawling ? "🔄 运行中" : "💤 空闲"}
 • 守护模式：${config.DAEMON_MODE ? "🟢 已启用" : "🔴 已禁用"}
-• 监控博主：${bloggerStats}
-• 抓取模式：${config.START_DATE ? `日期区间 (${config.START_DATE} ~ ${config.END_DATE || '今天'})` : '主页增量 Feed'}
+• 监控博主：${crawlInfo.bloggerStats}
+• 抓取模式：${crawlInfo.modeDesc}
 • 博文过滤：${config.ONLY_ORIGINAL ? '仅原创' : '全量 (原创+转发)'}
 • 评论抓取：${config.SCRAPE_COMMENTS ? `已开启 (上限: ${config.MAX_COMMENTS_PER_POST} 条/篇)` : '已禁用'}
 • 媒体下载：${getMediaDownloadSummary()}
@@ -257,18 +261,12 @@ export class TelegramBot {
     }
 
     this.isCrawling = true;
-    let usersDesc = '';
-    try {
-      const active = readUsers().filter((u: any) => !u.isCommented && u.uid);
-      usersDesc = `共 ${active.length} 位 (${active.map((u: any) => u.name || u.uid).join(', ')})`;
-    } catch {
-      usersDesc = config.USER_ID_LIST;
-    }
+    const crawlInfo = getCrawlModeSummary();
 
     let startMsg = `🚀 【已启动微博增量同步任务】\n\n`;
-    startMsg += `👥 目标博主: ${usersDesc}\n`;
+    startMsg += `👥 目标博主: ${crawlInfo.usersDesc}\n`;
     startMsg += `⚙️ 运行策略:\n`;
-    startMsg += `  • 抓取模式: ${config.START_DATE ? `日期区间 (${config.START_DATE} ~ ${config.END_DATE || '今天'})` : '主页增量 Feed'}\n`;
+    startMsg += `  • 抓取模式: ${crawlInfo.modeDesc}\n`;
     startMsg += `  • 博文过滤: ${config.ONLY_ORIGINAL ? '仅原创博文' : '全量 (原创 + 转发)'}\n`;
     startMsg += `  • 评论抓取: ${config.SCRAPE_COMMENTS ? `已开启 (最大上限: ${config.MAX_COMMENTS_PER_POST} 条/篇)` : '已关闭'}\n`;
     startMsg += `  • 媒体下载: ${getMediaDownloadSummary()}\n`;
@@ -297,10 +295,21 @@ export class TelegramBot {
 
   private static async handleUserCommand(parts: string[]): Promise<void> {
     const sub = parts[1]?.toLowerCase();
+    if (!isUserListFile()) {
+      if (!sub || sub === 'list') {
+        const uids = getActiveUids();
+        await Notifier.sendText(`📋 当前 USER_ID_LIST 为直接指定 UID 模式（非文件模式）：\n已启用 ${uids.length} 位博主: ${uids.join(', ')}\n\n💡 提示：如需通过机器人动态管理博主与时间游标，请在 .env 中将 USER_ID_LIST 配置为文本文件（如 userid.txt）。`);
+      } else {
+        await Notifier.sendText(`⚠️ 当前 USER_ID_LIST 为纯 UID 列表（${config.USER_ID_LIST}），非文本文件模式。如需通过命令动态管理博主与时间游标，请在 .env 中将 USER_ID_LIST 设置为文件名（如 userid.txt）。`);
+      }
+      return;
+    }
+
+    const currentFileName = path.basename(getUserFilePath());
     if (!sub || sub === 'list') {
       const users = readUsers();
       if (users.length === 0) {
-        await Notifier.sendText("ℹ️ 博主列表文件（userid.txt）中未发现任何记录。");
+        await Notifier.sendText(`ℹ️ 博主列表文件（${currentFileName}）中未发现任何记录。`);
       } else {
         let msg = "📋 博主列表及增量游标：\n";
         users.forEach((u, i) => {
@@ -310,7 +319,8 @@ export class TelegramBot {
             }
           } else {
             const status = u.isCommented ? '🔴 禁用' : '🟢 启用';
-            msg += `${i + 1}. ${status} | \`${u.uid}\` | ${u.name || '无昵称'} | 游标: ${u.cursor || '无'}\n`;
+            const endTag = u.endDate ? ` | 结束: ${u.endDate}` : '';
+            msg += `${i + 1}. ${status} | \`${u.uid}\` | ${u.name || '无昵称'} | 起始: ${u.cursor || '无'}${endTag}\n`;
           }
         });
         await Notifier.sendText(msg, 'Markdown');
@@ -377,8 +387,27 @@ export class TelegramBot {
           await Notifier.sendText(`❌ 未找到 UID 为 ${uid} 的博主。`);
         }
       }
+    } else if (sub === 'enddate' || sub === 'setenddate') {
+      const uid = parts[2];
+      const dateStr = parts[3];
+      if (!uid || !dateStr) {
+        await Notifier.sendText("⚠️ 格式错误。正确格式：/user enddate <UID> <YYYY-MM-DD|clear>");
+      } else {
+        const displayName = this.getBloggerDisplayName(uid);
+        const actualDate = (dateStr.toLowerCase() === 'clear' || dateStr.toLowerCase() === 'none') ? '' : dateStr;
+        const ok = setUserEndDate(uid, actualDate);
+        if (ok) {
+          if (actualDate) {
+            await Notifier.sendText(`✅ 已成功为 ${displayName} 设置同步结束时间为 ${actualDate}`);
+          } else {
+            await Notifier.sendText(`✅ 已成功清除 ${displayName} 的自定义结束时间（将默认遵循全局 END_DATE 或动态今天）`);
+          }
+        } else {
+          await Notifier.sendText(`❌ 未找到 UID 为 ${uid} 的博主。`);
+        }
+      }
     } else {
-      await Notifier.sendText("❓ 未知子命令。请使用 /user list, /user add, /user del, /user disable, /user enable, 或 /user date。");
+      await Notifier.sendText("❓ 未知子命令。请使用 /user list, /user add, /user del, /user disable, /user enable, /user date, 或 /user enddate。");
     }
   }
 
@@ -457,13 +486,13 @@ export class TelegramBot {
     if (isDate) {
       try {
         const specUid = parts[2];
-        const active = readUsers().filter(u => !u.isCommented && u.uid);
+        const activeUids = getActiveUids();
         if (specUid) {
           resolvedUid = specUid;
-        } else if (active.length === 1) {
-          resolvedUid = active[0].uid!;
-        } else if (active.length === 0) {
-          await Notifier.sendText("❌ 错误：在 userid.txt 中未找到启用的博主。");
+        } else if (activeUids.length === 1) {
+          resolvedUid = activeUids[0];
+        } else if (activeUids.length === 0) {
+          await Notifier.sendText("❌ 错误：在用户配置中未找到启用的博主。");
           return;
         } else {
           await Notifier.sendText(`❌ 错误：配置了多个博主，请指定 UID：\`/c ${target} <UID>\``, 'Markdown');
@@ -543,13 +572,13 @@ export class TelegramBot {
     if (isDate) {
       try {
         const specUid = parts[2];
-        const active = readUsers().filter((u: any) => !u.isCommented && u.uid);
+        const activeUids = getActiveUids();
         if (specUid) {
           resolvedUid = specUid;
-        } else if (active.length === 1) {
-          resolvedUid = active[0].uid!;
-        } else if (active.length === 0) {
-          await Notifier.sendText("❌ 错误：在 userid.txt 中未找到启用的博主。");
+        } else if (activeUids.length === 1) {
+          resolvedUid = activeUids[0];
+        } else if (activeUids.length === 0) {
+          await Notifier.sendText("❌ 错误：在用户配置中未找到启用的博主。");
           return;
         } else {
           await Notifier.sendText(`❌ 错误：配置了多个博主，请指定 UID：\`/d ${target} <UID>\``, 'Markdown');
@@ -700,13 +729,6 @@ export class TelegramBot {
    * Resolve nickname and format displayName: Nickname (UID) or just UID if not found
    */
   private static getBloggerDisplayName(uid: string): string {
-    try {
-      const users = readUsers();
-      const match = users.find((u: any) => u.uid === uid);
-      if (match?.name) {
-        return `${match.name} (${uid})`;
-      }
-    } catch {}
-    return uid;
+    return getBloggerDisplayName(uid);
   }
 }
