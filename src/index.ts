@@ -75,27 +75,11 @@ async function start() {
 
   const resolvedUid = uidIdx > -1 && args[uidIdx + 1] ? args[uidIdx + 1] : undefined;
 
-  const getBloggerDisplayName = (uid: string): string => {
-    try {
-      const { readUsers } = require('./utils/userFileHelper');
-      const users = readUsers();
-      const match = users.find((u: any) => u.uid === uid);
-      if (match?.name) return `${match.name} (${uid})`;
-    } catch {}
-    return uid;
-  };
+  const { getBloggerDisplayName, getActiveUids } = require('./utils/userFileHelper');
 
   const getOrResolveUid = (): string => {
     if (resolvedUid) return resolvedUid;
-    const { readUsers } = require('./utils/userFileHelper');
-    let activeUids: string[] = [];
-    const list = config.USER_ID_LIST.trim();
-    if (list.toLowerCase().endsWith('.txt')) {
-      const users = readUsers();
-      activeUids = users.filter((u: any) => !u.isCommented && u.uid).map((u: any) => u.uid!);
-    } else {
-      activeUids = list.split(',').map(s => s.trim()).filter(Boolean);
-    }
+    const activeUids = getActiveUids();
 
     if (activeUids.length === 1) {
       return activeUids[0];
@@ -228,19 +212,13 @@ async function start() {
 async function runSingleScrape() {
   const scraper = new WeiboScraper();
   try {
-    let usersDesc = '';
-    try {
-      const { readUsers } = require('./utils/userFileHelper');
-      const active = readUsers().filter((u: any) => !u.isCommented && u.uid);
-      usersDesc = `共 ${active.length} 位 (${active.map((u: any) => u.name || u.uid).join(', ')})`;
-    } catch {
-      usersDesc = config.USER_ID_LIST;
-    }
+    const { getCrawlModeSummary } = require('./utils/userFileHelper');
+    const crawlInfo = getCrawlModeSummary();
 
     let startMsg = `🚀 【单次增量爬取任务启动】\n\n`;
-    startMsg += `👥 目标博主: ${usersDesc}\n`;
+    startMsg += `👥 目标博主: ${crawlInfo.usersDesc}\n`;
     startMsg += `⚙️ 运行策略:\n`;
-    startMsg += `  • 抓取模式: ${config.START_DATE ? `日期区间 (${config.START_DATE} ~ ${config.END_DATE || '今天'})` : '主页增量 Feed'}\n`;
+    startMsg += `  • 抓取模式: ${crawlInfo.modeDesc}\n`;
     startMsg += `  • 博文过滤: ${config.ONLY_ORIGINAL ? '仅原创博文' : '全量 (原创 + 转发)'}\n`;
     startMsg += `  • 评论抓取: ${config.SCRAPE_COMMENTS ? `已开启 (最大上限: ${config.MAX_COMMENTS_PER_POST} 条/篇)` : '已关闭'}\n`;
     startMsg += `  • 媒体下载: ${getMediaDownloadSummary()}\n`;
