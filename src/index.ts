@@ -5,6 +5,7 @@ import { config, getMediaDownloadSummary } from './config';
 import { TelegramBot } from './utils/telegramBot';
 import { Notifier } from './utils/notifier';
 import { sessionManager } from './auth/SessionManager';
+import { cleanupActiveHookProcess } from './utils/postScriptRunner';
 // Register global unhandled rejection & exception handlers to protect daemon process
 process.on('unhandledRejection', (reason, promise) => {
   logger.error('Unhandled Promise Rejection at:', promise, 'reason:', reason);
@@ -37,6 +38,7 @@ async function start() {
   const handleShutdown = async (signal: string) => {
     logger.warn(`收到 ${signal} 信号。正在执行退出...`);
     try {
+      cleanupActiveHookProcess();
       sessionManager.stopKeepAlive();
       TelegramBot.stop();
       await closeDb();
@@ -114,7 +116,7 @@ async function start() {
       startMsg += `⏳ 任务正在执行中，完成后将推送数据报告...`;
       await Notifier.sendText(startMsg);
 
-      res = await scraper.crawlDateForUser(uid, target);
+      res = await scraper.crawlDateForUser(uid, target, 'CLI');
     } else {
       logger.info(`CLI：开始针对微博 "${target}" 的定向单条爬取`);
 
@@ -127,7 +129,7 @@ async function start() {
       startMsg += `⏳ 任务正在执行中，完成后将推送数据报告...`;
       await Notifier.sendText(startMsg);
 
-      res = await scraper.crawlSinglePost(target);
+      res = await scraper.crawlSinglePost(target, 'CLI');
     }
 
     if (res.success) {
@@ -226,7 +228,7 @@ async function runSingleScrape() {
     startMsg += `⏳ 任务正在执行中，完成后将推送数据报告...`;
     await Notifier.sendText(startMsg);
 
-    const summary = await scraper.run();
+    const summary = await scraper.run('CLI');
     await closeDb();
     logger.info('微博爬虫增量同步运行成功！');
     await Notifier.sendText(summary);

@@ -27,6 +27,10 @@
    - 手抖抓错了某天？一条命令就能把本地图片、视频、表格、文档和数据库记录彻底清理干净。
 6. **🤖 手机随时远程遥控 (Telegram 机器人)**：
    - 放在服务器后台挂着时，可以通过 Telegram 随时给它发指令，比如查查状态、让它马上抓一次、远程扫码登录、甚至临时加减博主名单。
+7. **☁️ 任务后置扩展脚本与网盘自动同步 (Post-Crawl Hook)**：
+   - 抓取完成后自动调用你的外部脚本（Python / Shell / PowerShell）或命令行工具（如 `rclone`）；
+   - 轻松实现将本地备份自动化同步至 Alist、OneDrive、百度网盘、阿里云盘或远程 NAS；
+   - 支持智能判定触发策略（如仅当有新内容时才同步）、阶梯超时熔断保护，并将网盘上传摘要合并推送至 Telegram 通知与终端日志。
 
 ---
 
@@ -42,6 +46,7 @@ weibo-backup/
 │   ├── downloader/            # 核心下载器：负责把图片、视频、实况照片多线程下载到本地
 │   ├── storage/               # 负责把抓到的内容存成 Markdown、表格、数据库、JSON
 │   └── utils/                 # 各种辅助工具（日志、Telegram机器人、时间转换等）
+├── scripts/                   # 任务后置扩展脚本示例（包含 Python 与 Shell 网盘同步范式）
 ├── output/                    # 默认下载下来的所有内容都存在这里
 ├── userid.txt                 # 你想抓哪些博主？把他们的数字 ID 写在这个文件里
 ├── state.json                 # 扫码成功后自动生成的登录凭据（注意不要发给别人）
@@ -210,6 +215,13 @@ node dist/index.js -d 2026-09-26 -u 1234567890
 ### 4. 其它设置
 - `LOGIN_MODE=TERMINAL_QR`：登录模式。在本地电脑运行推荐 `TERMINAL_QR`，控制台里直接出二维码。
 - `HTTP_PROXY=`：网络代理。如果你的服务器在国外或者连某些通知需要走代理，可以填类似 `http://127.0.0.1:7890`。
+
+### 5. 任务后置扩展脚本与网盘同步配置 (可选)
+- `POST_SCRIPT_COMMAND=`：外部脚本路径或执行命令（留空表示不启用）。例如：`scripts/post_hook_example.py`、`rclone sync ./output onedrive:/weibo-backup`
+- `POST_SCRIPT_TRIGGER=has_new_data`：触发策略。支持 `has_new_data`（仅当有新博文或媒体落盘时触发，默认推荐）、`success`（只要成功即触发）、`always`（始终触发）、`failure`（仅失败时触发）
+- `POST_SCRIPT_WAIT=true`：是否等待脚本执行完毕并将执行状态与摘要合并推送至 Telegram 报告
+- `POST_SCRIPT_TIMEOUT=10m`：脚本执行超时时间（默认 10 分钟），超时将安全熔断强杀，绝不影响爬虫已保存的数据
+- `POST_SCRIPT_INHERIT_PROXY=false`：外部脚本是否继承爬虫的代理配置（默认 false，防范局域网 NAS / 国内网盘走代理超时）
 
 ---
 

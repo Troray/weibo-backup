@@ -7,6 +7,7 @@ dotenv.config({ quiet: true });
 export type LoginMode = 'TERMINAL_QR' | 'BOT_NOTIFY' | 'LOCAL_SYNC';
 export type DbType = 'sqlite' | 'mysql' | 'postgres';
 export type DateOrder = 'asc' | 'desc';
+export type PostScriptTrigger = 'has_new_data' | 'success' | 'always' | 'failure';
 
 export interface ScraperConfig {
   // 目标配置
@@ -71,6 +72,13 @@ export interface ScraperConfig {
   // 关系型数据库配置
   DB_TYPE: DbType | null; // 数据库类型（sqlite, mysql, postgres，若留空则为 null）
   DB_URI: string; // 数据库连接地址。SQLite 填写文件路径，MySQL/PG 填写 URI 连接字符串
+  
+  // 任务后置扩展脚本配置
+  POST_SCRIPT_COMMAND?: string; // 任务完成后调用的外部脚本路径或执行命令 (留空不启用)
+  POST_SCRIPT_TRIGGER: PostScriptTrigger; // 脚本触发时机策略: has_new_data | success | always | failure
+  POST_SCRIPT_WAIT: boolean; // 是否等待脚本执行完毕 (默认 true)
+  POST_SCRIPT_TIMEOUT: number; // 脚本执行超时时间（毫秒，默认 10 分钟）
+  POST_SCRIPT_INHERIT_PROXY: boolean; // 是否继承爬虫的 HTTP_PROXY 代理配置 (默认 false)
 }
 
 const getEnvArray = (key: string, defaultValue: string[]): string[] => {
@@ -188,6 +196,31 @@ export const config: ScraperConfig = {
     return trimmed ? (trimmed.toLowerCase() as DbType) : null;
   })(),
   DB_URI: getEnvStr('DB_URI') || path.join(process.cwd(), 'weibo.sqlite'),
+  
+  POST_SCRIPT_COMMAND: getEnvStr('POST_SCRIPT_COMMAND') || undefined,
+  POST_SCRIPT_TRIGGER: (() => {
+    const raw = (getEnvStr('POST_SCRIPT_TRIGGER') || 'has_new_data').toLowerCase().trim();
+    if (['has_new_data', 'success', 'always', 'failure'].includes(raw)) {
+      return raw as PostScriptTrigger;
+    }
+    return 'has_new_data';
+  })(),
+  POST_SCRIPT_WAIT: getEnvBool('POST_SCRIPT_WAIT', true),
+  POST_SCRIPT_TIMEOUT: (() => {
+    const raw = getEnvStr('POST_SCRIPT_TIMEOUT', '10m')!;
+    const match = raw.match(/^(\d+(?:\.\d+)?)\s*(ms|s|m|h)?$/i);
+    if (match) {
+      const val = parseFloat(match[1]);
+      const unit = (match[2] || 'm').toLowerCase();
+      if (unit === 'h') return Math.floor(val * 3600 * 1000);
+      if (unit === 'm') return Math.floor(val * 60 * 1000);
+      if (unit === 's') return Math.floor(val * 1000);
+      if (unit === 'ms') return Math.floor(val);
+    }
+    const num = parseInt(raw, 10);
+    return isNaN(num) ? 10 * 60 * 1000 : num;
+  })(),
+  POST_SCRIPT_INHERIT_PROXY: getEnvBool('POST_SCRIPT_INHERIT_PROXY', false),
 };
 
 export function getMediaDownloadSummary(): string {

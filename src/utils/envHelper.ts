@@ -180,5 +180,25 @@ function updateConfigInMemory(key: string, value: string): void {
     
     case 'DB_TYPE': conf.DB_TYPE = value ? value.toLowerCase() : null; break;
     case 'DB_URI': conf.DB_URI = value; break;
+
+    case 'POST_SCRIPT_COMMAND': conf.POST_SCRIPT_COMMAND = value || undefined; break;
+    case 'POST_SCRIPT_TRIGGER': conf.POST_SCRIPT_TRIGGER = value || 'has_new_data'; break;
+    case 'POST_SCRIPT_WAIT': conf.POST_SCRIPT_WAIT = parseBool(value); break;
+    case 'POST_SCRIPT_TIMEOUT': {
+      const match = value.match(/^(\d+(?:\.\d+)?)\s*(ms|s|m|h)?$/i);
+      if (match) {
+        const val = parseFloat(match[1]);
+        const unit = (match[2] || 'm').toLowerCase();
+        if (unit === 'h') conf.POST_SCRIPT_TIMEOUT = Math.floor(val * 3600 * 1000);
+        else if (unit === 'm') conf.POST_SCRIPT_TIMEOUT = Math.floor(val * 60 * 1000);
+        else if (unit === 's') conf.POST_SCRIPT_TIMEOUT = Math.floor(val * 1000);
+        else if (unit === 'ms') conf.POST_SCRIPT_TIMEOUT = Math.floor(val);
+      } else {
+        const num = parseNum(value);
+        conf.POST_SCRIPT_TIMEOUT = num > 0 ? num : 10 * 60 * 1000;
+      }
+      break;
+    }
+    case 'POST_SCRIPT_INHERIT_PROXY': conf.POST_SCRIPT_INHERIT_PROXY = parseBool(value); break;
   }
 }
