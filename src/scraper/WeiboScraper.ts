@@ -991,12 +991,26 @@ export class WeiboScraper {
       await this.pipeline.processPost(parsedPost, screenName, uid);
 
       // 2. 流式抓取评论，边抓边存（写入数据库与 CSV，定期刷新检查点）
-      comments = await this.scrapeComments(parsedPost.id, uid, async (batch) => {
-        await this.pipeline.appendCommentsBatch(parsedPost, batch, screenName, uid);
-      });
+      let scrapeError: any = null;
+      try {
+        comments = await this.scrapeComments(parsedPost.id, uid, async (batch) => {
+          await this.pipeline.appendCommentsBatch(parsedPost, batch, screenName, uid);
+        });
+      } catch (err: any) {
+        scrapeError = err;
+        logger.error(`抓取微博 ${parsedPost.id} 评论过程中遇到错误: ${err.message}`);
+      }
 
-      // 3. 最终全量同步更新（Markdown 原地替换，日 JSON 替换更新）
-      await this.pipeline.finishPostComments(parsedPost, comments, screenName, uid);
+      // 3. 最终全量同步更新（Markdown 原地替换，日 JSON 替换更新），即便中途报错也抢救性落盘已抓取数据
+      try {
+        await this.pipeline.finishPostComments(parsedPost, comments, screenName, uid);
+      } catch (finishErr: any) {
+        logger.error(`最终全量更新微博 ${parsedPost.id} 到存储介质失败: ${finishErr.message}`);
+      }
+
+      if (scrapeError) {
+        throw scrapeError;
+      }
     } else {
       // 传统轻量模式
       if (config.SCRAPE_COMMENTS && parsedPost.comments_count > 0) {
@@ -1148,6 +1162,9 @@ export class WeiboScraper {
                 }
                 if (parsedComments.length >= limit || this.isAborted) break;
               }
+            }
+            if (pendingBatch.length >= 100 || parsedComments.length - lastFlushedCount >= 100) {
+              await flushBatch();
             }
           }
 

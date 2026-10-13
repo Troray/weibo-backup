@@ -51,6 +51,14 @@ export class CommentCheckpointManager {
       const content = fs.readFileSync(filePath, 'utf8');
       const data = JSON.parse(content) as CommentCheckpoint;
       if (data && Array.isArray(data.comments)) {
+        if (data.updatedAt) {
+          const updatedAtMs = new Date(data.updatedAt).getTime();
+          if (!isNaN(updatedAtMs) && Date.now() - updatedAtMs > 7 * 24 * 3600 * 1000) {
+            logger.info(`微博 ${postId} 的检查点已超过 7 天，已自动废弃旧暂存。`);
+            this.clearCheckpoint(postId);
+            return null;
+          }
+        }
         return data;
       }
     } catch (err: any) {
@@ -77,7 +85,12 @@ export class CommentCheckpointManager {
 
     try {
       fs.writeFileSync(tempPath, JSON.stringify(checkpoint), 'utf8');
-      fs.renameSync(tempPath, targetPath);
+      try {
+        fs.renameSync(tempPath, targetPath);
+      } catch {
+        fs.copyFileSync(tempPath, targetPath);
+        try { fs.unlinkSync(tempPath); } catch {}
+      }
     } catch (err: any) {
       logger.warn(`保存微博 ${postId} 评论检查点失败: ${err.message}`);
       try {

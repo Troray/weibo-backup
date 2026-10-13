@@ -50,8 +50,24 @@ async function start() {
       logger.warn(`⚠️ 收到 ${signal} (Ctrl+C) 信号。正在安全收尾当前抓取任务并将已获取内容落盘，请稍候...（如需强制立即退出请再次按 Ctrl+C）`);
       activeScraper.requestAbort();
 
+      // 周期检测 activeScraper 是否已完成收尾
+      const checkInterval = setInterval(async () => {
+        if (!activeScraper) {
+          clearInterval(checkInterval);
+          logger.info('已成功完成安全收尾落盘，正在结束进程。');
+          try {
+            cleanupActiveHookProcess();
+            sessionManager.stopKeepAlive();
+            TelegramBot.stop();
+            await closeDb();
+          } catch {}
+          process.exit(0);
+        }
+      }, 500);
+
       // 15 秒超时保底
       setTimeout(async () => {
+        clearInterval(checkInterval);
         logger.warn('收尾超时，强制结束进程。');
         try { await closeDb(); } catch {}
         process.exit(130);
