@@ -132,6 +132,7 @@ export async function initializeSchema(db: Knex): Promise<void> {
       table.boolean('verified');
       table.string('verified_type');
       table.string('verified_reason');
+      table.string('real_auth');
       table.integer('followers_count');
       table.integer('friends_count');
       table.integer('statuses_count');
@@ -239,6 +240,7 @@ export async function upsertUserProfile(db: Knex, profile: any): Promise<void> {
     verified: profile.verified,
     verified_type: profile.verifiedType || '',
     verified_reason: profile.verifiedReason || '',
+    real_auth: profile.realAuth || '',
     followers_count: profile.followersCount || 0,
     friends_count: profile.friendsCount || 0,
     statuses_count: profile.statusesCount || 0,

@@ -32,6 +32,7 @@ export interface BloggerProfileData {
   verified: boolean;
   verifiedReason: string;
   verifiedType: string;
+  realAuth: string;
   description: string;
   followersCount: number;
   followersCountStr: string;
@@ -191,6 +192,21 @@ export function formatVipInfo(user: any): string {
   if (user?.vvip) parts.push(`VVIP${user.vvip}`);
   if (user?.mbrank) parts.push(`VIP等级: ${user.mbrank}`);
   return parts.length > 0 ? parts.join(' | ') : '普通用户';
+}
+
+/**
+ * 格式化实名认证状态
+ */
+export function formatRealAuth(detail: any): string {
+  if (detail?.real_auth === true) {
+    if (detail.real_name?.name) {
+      return `已认证 (${detail.real_name.name})`;
+    }
+    return '已认证';
+  } else if (detail?.real_auth === false) {
+    return '未认证';
+  }
+  return '未公开';
 }
 
 export class BloggerProfileManager {
@@ -407,6 +423,7 @@ export class BloggerProfileManager {
     const career = parseCareer(detail.career, detail.company);
     const sunshineCredit = detail.sunshine_credit?.level || '未公开';
     const createdAt = detail.created_at || '未公开';
+    const realAuth = formatRealAuth(detail);
     const verified = !!user.verified;
     const verifiedReason = user.verified_reason || detail.desc_text || '';
     const verifiedType = getVerifiedTypeDesc(verified, user.verified_type, user.verified_type_ext);
@@ -442,8 +459,20 @@ export class BloggerProfileManager {
 
     // 6. 下载媒体文件 (头像、手机背景、网页背景)
     const avatarUrl = user.avatar_hd || user.avatar_large || user.profile_image_url || '';
-    const coverPhoneUrl = user.cover_image_phone || '';
-    const coverWebUrl = user.cover_image || '';
+    const rawCoverPhone = user.cover_image_phone || '';
+    const rawCoverWeb = user.cover_image || '';
+
+    // 解析网页端超清原画背景大图：
+    // 微博 API 通常在 cover_image_phone 返回 /crop.0.0.640.640.640/ 裁剪缩略图，
+    // 将其裁剪前缀去除并转为 /large/，即可得到网页端实际展示的超清原画大图（高达 2160x2160 像素）
+    let coverWebUrl = '';
+    if (rawCoverWeb) {
+      coverWebUrl = rawCoverWeb.replace(/\/crop\.[^/]+\//, '/large/');
+    } else if (rawCoverPhone) {
+      coverWebUrl = rawCoverPhone.replace(/\/crop\.[^/]+\//, '/large/');
+    }
+
+    const coverPhoneUrl = rawCoverPhone;
 
     const avatarLocalPath = path.join('profile', 'avatar.jpg').replace(/\\/g, '/');
     const coverPhoneLocalPath = path.join('profile', 'cover_phone.jpg').replace(/\\/g, '/');
@@ -454,15 +483,16 @@ export class BloggerProfileManager {
       await this.downloadMediaFile(avatarUrl, path.join(userDir, 'profile', 'avatar.jpg'));
     }
 
-    if (coverPhoneUrl) {
-      logger.info(`正在初次下载手机端主页背景图片: ${coverPhoneUrl}`);
-      await this.downloadMediaFile(coverPhoneUrl, path.join(userDir, 'profile', 'cover_phone.jpg'));
-    }
-
     let hasCoverWeb = false;
     if (coverWebUrl) {
-      logger.info(`正在初次下载网页端主页背景图片: ${coverWebUrl}`);
+      logger.info(`正在初次下载网页端主页背景图片 (超清原画): ${coverWebUrl}`);
       hasCoverWeb = await this.downloadMediaFile(coverWebUrl, path.join(userDir, 'profile', 'cover_web.jpg'));
+    }
+
+    let hasCoverPhone = false;
+    if (coverPhoneUrl) {
+      logger.info(`正在初次下载手机端主页背景图片: ${coverPhoneUrl}`);
+      hasCoverPhone = await this.downloadMediaFile(coverPhoneUrl, path.join(userDir, 'profile', 'cover_phone.jpg'));
     }
 
     const updatedAt = new Date().toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' });
@@ -482,6 +512,7 @@ export class BloggerProfileManager {
       verified,
       verifiedReason,
       verifiedType,
+      realAuth,
       description,
       followersCount,
       followersCountStr,
@@ -500,7 +531,7 @@ export class BloggerProfileManager {
         avatarUrl,
         avatarLocalPath,
         coverPhoneUrl,
-        coverPhoneLocalPath,
+        coverPhoneLocalPath: hasCoverPhone ? coverPhoneLocalPath : '',
         coverWebUrl: coverWebUrl || undefined,
         coverWebLocalPath: hasCoverWeb ? coverWebLocalPath : undefined
       },
@@ -549,6 +580,7 @@ export class BloggerProfileManager {
     text += `阳光信用：${data.sunshineCredit || '未公开'}\n`;
     text += `注册时间：${data.createdAt || '未公开'}\n`;
     text += `认证信息：${data.verified ? `已认证 (${data.verifiedType})${data.verifiedReason ? ` - ${data.verifiedReason}` : ''}` : '未认证'}\n`;
+    text += `实名认证：${data.realAuth || '未公开'}\n`;
     text += `会员等级：${data.vipInfo || '普通用户'}\n\n`;
 
     text += `【社交与互动数据】\n`;
@@ -569,8 +601,8 @@ export class BloggerProfileManager {
 
     text += `【多媒体资源】\n`;
     text += `头像：${data.media.avatarLocalPath || '无'} (在线链接: ${data.media.avatarUrl || '无'})\n`;
-    text += `手机端背景图片：${data.media.coverPhoneLocalPath || '无'} (在线链接: ${data.media.coverPhoneUrl || '无'})\n`;
-    text += `网页端背景图片：${data.media.coverWebLocalPath || '默认背景'} (在线链接: ${data.media.coverWebUrl || '无'})\n\n`;
+    text += `网页端背景图片：${data.media.coverWebLocalPath || '默认背景'} (在线链接: ${data.media.coverWebUrl || '无'})\n`;
+    text += `手机端背景图片：${data.media.coverPhoneLocalPath || '无'} (在线链接: ${data.media.coverPhoneUrl || '无'})\n\n`;
 
     text += `【主页链接】\n`;
     text += `微博主页：${data.pageUrl}\n`;
