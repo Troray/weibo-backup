@@ -976,14 +976,17 @@ export class WeiboScraper {
   ): Promise<ParsedComment[]> {
     let comments: ParsedComment[] = [];
     const threshold = config.COMMENT_CHUNKING_THRESHOLD;
-    const shouldStream = threshold > 0 && config.SCRAPE_COMMENTS && (
-      parsedPost.comments_count >= threshold ||
-      (config.MAX_COMMENTS_PER_POST > 0 && config.MAX_COMMENTS_PER_POST >= threshold) ||
-      config.MAX_COMMENTS_PER_POST === 0
-    );
+    const postCommentsCount = parsedPost.comments_count || 0;
+    const userLimit = config.MAX_COMMENTS_PER_POST;
+    // 实际预计爬取的评论数量：受博文本身评论总数与用户配置的上限共同约束
+    const expectedComments = userLimit > 0 
+      ? Math.min(postCommentsCount, userLimit) 
+      : postCommentsCount;
+
+    const shouldStream = threshold > 0 && config.SCRAPE_COMMENTS && expectedComments >= threshold;
 
     if (shouldStream) {
-      logger.info(`[流式策略] 微博 ${parsedPost.id} 评论量较多 (${parsedPost.comments_count}条，阈值: ${threshold})，启用正文优先归档与评论流式同步...`);
+      logger.info(`[流式策略] 微博 ${parsedPost.id} 预计爬取评论较多 (${expectedComments}条，阈值: ${threshold})，启用正文优先归档与评论流式同步...`);
       // 1. 先行安全归档博文正文及超清媒体，确保后续网络中断不丢失正文与视频/图片
       await this.pipeline.processPost(parsedPost, screenName, uid);
 
