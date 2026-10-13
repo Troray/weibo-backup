@@ -113,6 +113,41 @@ export async function initializeSchema(db: Knex): Promise<void> {
     });
     logger.info('Table "comments" created.');
   }
+
+  // Create user_profiles table
+  const hasProfiles = await db.schema.hasTable('user_profiles');
+  if (!hasProfiles) {
+    await db.schema.createTable('user_profiles', (table) => {
+      table.string('uid').primary();
+      table.string('screen_name');
+      table.string('gender');
+      table.string('birthday');
+      table.string('constellation');
+      table.string('location');
+      table.string('ip_location');
+      table.text('education');
+      table.text('career');
+      table.string('sunshine_credit');
+      table.string('created_at_weibo');
+      table.boolean('verified');
+      table.string('verified_type');
+      table.string('verified_reason');
+      table.integer('followers_count');
+      table.integer('friends_count');
+      table.integer('statuses_count');
+      table.string('total_cnt');
+      table.text('description');
+      table.string('avatar_url');
+      table.string('avatar_local');
+      table.string('cover_phone_url');
+      table.string('cover_phone_local');
+      table.string('cover_web_url');
+      table.string('cover_web_local');
+      table.text('raw_json');
+      table.timestamps(true, true);
+    });
+    logger.info('Table "user_profiles" created.');
+  }
 }
 
 export async function upsertPost(db: Knex, post: any): Promise<void> {
@@ -183,6 +218,51 @@ export async function upsertComment(db: Knex, comment: any): Promise<void> {
       ...dbData,
       created_at: new Date(),
       updated_at: new Date(),
+    });
+  }
+}
+
+export async function upsertUserProfile(db: Knex, profile: any): Promise<void> {
+  const existing = await db('user_profiles').where({ uid: profile.uid }).first();
+  const dbData = {
+    uid: profile.uid,
+    screen_name: profile.screenName,
+    gender: profile.gender,
+    birthday: profile.birthday || '',
+    constellation: profile.constellation || '',
+    location: profile.location || '',
+    ip_location: profile.ipLocation || '',
+    education: profile.education || '',
+    career: profile.career || '',
+    sunshine_credit: profile.sunshineCredit || '',
+    created_at_weibo: profile.createdAt || '',
+    verified: profile.verified,
+    verified_type: profile.verifiedType || '',
+    verified_reason: profile.verifiedReason || '',
+    followers_count: profile.followersCount || 0,
+    friends_count: profile.friendsCount || 0,
+    statuses_count: profile.statusesCount || 0,
+    total_cnt: profile.totalInteractions || '',
+    description: profile.description || '',
+    avatar_url: profile.media?.avatarUrl || '',
+    avatar_local: profile.media?.avatarLocalPath || '',
+    cover_phone_url: profile.media?.coverPhoneUrl || '',
+    cover_phone_local: profile.media?.coverPhoneLocalPath || '',
+    cover_web_url: profile.media?.coverWebUrl || '',
+    cover_web_local: profile.media?.coverWebLocalPath || '',
+    raw_json: JSON.stringify({ rawInfo: profile.rawInfo, rawDetail: profile.rawDetail })
+  };
+
+  if (existing) {
+    await db('user_profiles').where({ uid: profile.uid }).update({
+      ...dbData,
+      updated_at: new Date()
+    });
+  } else {
+    await db('user_profiles').insert({
+      ...dbData,
+      created_at: new Date(),
+      updated_at: new Date()
     });
   }
 }
