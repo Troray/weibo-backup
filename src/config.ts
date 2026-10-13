@@ -52,6 +52,7 @@ export interface ScraperConfig {
   MAX_SUB_COMMENTS_PER_COMMENT: number; // 单条主评论最大抓取子评论(楼中楼)数
   REQUEST_DELAY_MIN: number; // 评论抓取最小延迟（毫秒）
   REQUEST_DELAY_MAX: number; // 评论抓取最大延迟（毫秒）
+  COMMENT_CHUNKING_THRESHOLD: number; // 启用评论分批流式落盘与断点暂存的评论数量阈值（默认 200，若设置为 0 或负数则禁用）
   
   // 媒体下载配置
   DOWNLOAD_ORIGINAL_IMAGES: boolean; // 是否下载原创微博的高清大图
@@ -170,6 +171,7 @@ export const config: ScraperConfig = {
   MAX_SUB_COMMENTS_PER_COMMENT: getEnvNum('MAX_SUB_COMMENTS_PER_COMMENT', 50),
   REQUEST_DELAY_MIN: getEnvNum('REQUEST_DELAY_MIN', 1500),
   REQUEST_DELAY_MAX: getEnvNum('REQUEST_DELAY_MAX', 3000),
+  COMMENT_CHUNKING_THRESHOLD: getEnvNum('COMMENT_CHUNKING_THRESHOLD', 200),
   
   DOWNLOAD_ORIGINAL_IMAGES: getEnvBool('DOWNLOAD_ORIGINAL_IMAGES', true),
   DOWNLOAD_ORIGINAL_VIDEOS: getEnvBool('DOWNLOAD_ORIGINAL_VIDEOS', true),
