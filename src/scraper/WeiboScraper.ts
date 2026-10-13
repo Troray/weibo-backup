@@ -26,6 +26,7 @@ import {
 import { executePostScript, formatHookSummaryForReport, HookContext } from '../utils/postScriptRunner';
 import { escapeHtml } from '../utils/htmlHelper';
 import { BloggerProfileManager } from './BloggerProfileManager';
+import { CommentCheckpointManager } from './CommentCheckpointManager';
 
 // Re-export for backward compatibility
 export { SessionExpiredError };
@@ -148,6 +149,15 @@ export class WeiboScraper {
   private screenNameCache = new Map<string, string>();
   private crawledPostsDayCache = new Map<string, Set<string>>();
   private activeStats = new Map<string, CrawlStatsEntry>();
+  private isAborted: boolean = false;
+
+  public requestAbort(): void {
+    this.isAborted = true;
+  }
+
+  public isAborting(): boolean {
+    return this.isAborted;
+  }
 
   constructor() {
     this.pipeline = new StoragePipeline();
@@ -741,17 +751,10 @@ export class WeiboScraper {
           }
         }
 
-        // Comments and storage pipeline process
-        let comments: ParsedComment[] = [];
+        // Comments and storage pipeline process (with chunking threshold support)
         try {
-          if (config.SCRAPE_COMMENTS && parsedPost.comments_count > 0) {
-            comments = await this.scrapeComments(parsedPost.id, uid);
-          }
-
-          // Dispatch to storage pipeline
-          await this.pipeline.process(parsedPost, comments, screenName, uid);
+          const comments = await this.processPostWithComments(parsedPost, screenName, uid);
           this.markPostAsCrawled(uid, postDateStr, parsedPost.id);
-
           this.updatePostStats(uid, parsedPost, comments);
         } catch (err: any) {
           logger.error(`处理微博 ID ${parsedPost.id} 时出错: ${err.message}`);
@@ -909,16 +912,9 @@ export class WeiboScraper {
           }
         }
 
-        // Fetch comments
-        let comments: ParsedComment[] = [];
-        if (config.SCRAPE_COMMENTS && parsedPost.comments_count > 0) {
-          comments = await this.scrapeComments(parsedPost.id, uid);
-        }
-
-        // Dispatch to storage
-        await this.pipeline.process(parsedPost, comments, screenName, uid);
+        // Fetch comments and dispatch to storage (with chunking threshold support)
+        const comments = await this.processPostWithComments(parsedPost, screenName, uid);
         this.markPostAsCrawled(uid, currentDay, parsedPost.id);
-
         this.updatePostStats(uid, parsedPost, comments);
 
         // Standard delay
@@ -968,19 +964,104 @@ export class WeiboScraper {
   }
 
   /**
-   * Scrapes comments for a post, including sub-comments
+   * 综合处理单条博文及评论的持久化。
+   * 根据 COMMENT_CHUNKING_THRESHOLD 阈值自适应策略：
+   * - 若评论量达到阈值：采用“正文优先安全落盘 + 评论分批流式落盘与断点暂存”；
+   * - 若评论量未达阈值：采用原生轻量一次性模式。
    */
-  private async scrapeComments(postId: string, uid: string): Promise<ParsedComment[]> {
+  private async processPostWithComments(
+    parsedPost: ParsedPost,
+    screenName: string,
+    uid: string
+  ): Promise<ParsedComment[]> {
+    let comments: ParsedComment[] = [];
+    const threshold = config.COMMENT_CHUNKING_THRESHOLD;
+    const shouldStream = threshold > 0 && config.SCRAPE_COMMENTS && (
+      parsedPost.comments_count >= threshold ||
+      (config.MAX_COMMENTS_PER_POST > 0 && config.MAX_COMMENTS_PER_POST >= threshold) ||
+      config.MAX_COMMENTS_PER_POST === 0
+    );
+
+    if (shouldStream) {
+      logger.info(`[流式策略] 微博 ${parsedPost.id} 评论量较多 (${parsedPost.comments_count}条，阈值: ${threshold})，启用正文优先归档与评论流式同步...`);
+      // 1. 先行安全归档博文正文及超清媒体，确保后续网络中断不丢失正文与视频/图片
+      await this.pipeline.processPost(parsedPost, screenName, uid);
+
+      // 2. 流式抓取评论，边抓边存（写入数据库与 CSV，定期刷新检查点）
+      comments = await this.scrapeComments(parsedPost.id, uid, async (batch) => {
+        await this.pipeline.appendCommentsBatch(parsedPost, batch, screenName, uid);
+      });
+
+      // 3. 最终全量同步更新（Markdown 原地替换，日 JSON 替换更新）
+      await this.pipeline.finishPostComments(parsedPost, comments, screenName, uid);
+    } else {
+      // 传统轻量模式
+      if (config.SCRAPE_COMMENTS && parsedPost.comments_count > 0) {
+        comments = await this.scrapeComments(parsedPost.id, uid);
+      }
+      await this.pipeline.process(parsedPost, comments, screenName, uid);
+    }
+
+    // 若顺利完成（非用户或系统异常中断），清理已安全落盘的临时断点文件
+    if (!this.isAborted) {
+      CommentCheckpointManager.clearCheckpoint(parsedPost.id);
+    }
+
+    return comments;
+  }
+
+  /**
+   * Scrapes comments for a post, including sub-comments.
+   * 支持断点检查点恢复 (Checkpoint Resume)、分批刷盘暂存以及流式落盘回调 (onBatch)。
+   */
+  private async scrapeComments(
+    postId: string,
+    uid: string,
+    onBatch?: (batch: ParsedComment[]) => Promise<void>
+  ): Promise<ParsedComment[]> {
     const parsedComments: ParsedComment[] = [];
     const seenCommentIds = new Set<string>();
     const limit = config.MAX_COMMENTS_PER_POST <= 0 ? Infinity : config.MAX_COMMENTS_PER_POST;
 
-    const spinner = new Spinner(`正在获取微博 ID: ${postId} 的评论列表: 已获取 0 条...`);
+    // 检查是否存在断点检查点
+    const checkpoint = CommentCheckpointManager.loadCheckpoint(postId);
+    if (checkpoint && checkpoint.comments.length > 0) {
+      for (const c of checkpoint.comments) {
+        if (!seenCommentIds.has(c.id)) {
+          seenCommentIds.add(c.id);
+          parsedComments.push(c);
+        }
+      }
+      logger.info(`[断点检查点] 发现微博 ${postId} 已暂存的 ${parsedComments.length} 条评论，已恢复已有进度！`);
+    }
+
+    const spinner = new Spinner(`正在获取微博 ID: ${postId} 的评论列表: 已获取 ${parsedComments.length} 条...`);
     if (process.stdout.isTTY) {
       spinner.start();
     } else {
-      logger.info(`正在获取微博 ID: ${postId} 的评论列表...`);
+      logger.info(`正在获取微博 ID: ${postId} 的评论列表: 已获取 ${parsedComments.length} 条...`);
     }
+
+    // 维护流式批量暂存与落盘状态
+    let lastFlushedCount = parsedComments.length;
+    let pendingBatch: ParsedComment[] = [];
+
+    const flushBatch = async () => {
+      if (pendingBatch.length > 0) {
+        if (onBatch) {
+          try {
+            await onBatch([...pendingBatch]);
+          } catch (e: any) {
+            logger.error(`流式落盘批次写入出错: ${e.message}`);
+          }
+        }
+        pendingBatch = [];
+      }
+      if (parsedComments.length > lastFlushedCount) {
+        CommentCheckpointManager.saveCheckpoint(postId, uid, parsedComments);
+        lastFlushedCount = parsedComments.length;
+      }
+    };
 
     // Determine flow sequence: if default COMMENT_FLOW is 0 (按热度), we first fetch hot comments,
     // and if limit is not reached, optionally fall back to flow=1 (按时间) to capture any additional timeline comments.
@@ -993,13 +1074,13 @@ export class WeiboScraper {
     }
 
     for (const currentFlow of flowsToTry) {
-      if (parsedComments.length >= limit) break;
+      if (parsedComments.length >= limit || this.isAborted) break;
 
       let maxId = '0';
       let keepFetching = true;
       const seenMaxIds = new Set<string>();
 
-      while (keepFetching && parsedComments.length < limit) {
+      while (keepFetching && parsedComments.length < limit && !this.isAborted) {
         if (seenMaxIds.has(maxId)) {
           break;
         }
@@ -1020,29 +1101,35 @@ export class WeiboScraper {
           break;
         }
 
+        if (this.isAborted) break;
+
         const data = commentsData?.data || [];
         if (data.length === 0) {
           break;
         }
 
         for (const rawComment of data) {
+          if (this.isAborted) break;
           const parsedComment = parseComment(rawComment, postId);
           if (!seenCommentIds.has(parsedComment.id)) {
             seenCommentIds.add(parsedComment.id);
             parsedComments.push(parsedComment);
+            pendingBatch.push(parsedComment);
           }
 
           const rawReplies = rawComment.comments || [];
           for (const rawReply of rawReplies) {
+            if (this.isAborted) break;
             const parsedReply = parseComment(rawReply, postId, parsedComment.id);
             if (!seenCommentIds.has(parsedReply.id)) {
               seenCommentIds.add(parsedReply.id);
               parsedComments.push(parsedReply);
+              pendingBatch.push(parsedReply);
             }
           }
 
           const totalNumber = rawComment.total_number || 0;
-          if (totalNumber > rawReplies.length && parsedComments.length < limit) {
+          if (!this.isAborted && totalNumber > rawReplies.length && parsedComments.length < limit) {
             spinner.updateText(`正在获取微博 ID: ${postId} 的评论列表: 已获取 ${parsedComments.length} 条 (正在补充楼中楼回复)...`);
             const subLimitSetting = config.MAX_SUB_COMMENTS_PER_COMMENT <= 0 ? Infinity : config.MAX_SUB_COMMENTS_PER_COMMENT;
             const remainingQuota = limit === Infinity ? Infinity : Math.max(0, limit - parsedComments.length);
@@ -1054,18 +1141,26 @@ export class WeiboScraper {
                 if (!seenCommentIds.has(reply.id)) {
                   seenCommentIds.add(reply.id);
                   parsedComments.push(reply);
+                  pendingBatch.push(reply);
                 }
-                if (parsedComments.length >= limit) break;
+                if (parsedComments.length >= limit || this.isAborted) break;
               }
             }
           }
 
-          if (parsedComments.length >= limit) {
+          if (parsedComments.length >= limit || this.isAborted) {
             break;
           }
         }
 
+        // 检查是否达到分批暂存/流式刷盘阈值（累积 100 条）
+        if (pendingBatch.length >= 100 || parsedComments.length - lastFlushedCount >= 100) {
+          await flushBatch();
+        }
+
         spinner.updateText(`正在获取微博 ID: ${postId} 的评论列表: 已获取 ${parsedComments.length} 条...`);
+
+        if (this.isAborted) break;
 
         const nextMaxId = commentsData?.max_id?.toString() || '0';
         if (nextMaxId === '0' || nextMaxId === '' || seenMaxIds.has(nextMaxId)) {
@@ -1075,6 +1170,19 @@ export class WeiboScraper {
           await new Promise(resolve => setTimeout(resolve, config.REQUEST_DELAY_MIN + Math.random() * (config.REQUEST_DELAY_MAX - config.REQUEST_DELAY_MIN)));
         }
       }
+    }
+
+    // 循环结束后刷写剩余未落盘批次
+    await flushBatch();
+
+    if (this.isAborted) {
+      const msg = `⚠️ 微博 ${postId} 评论抓取已响应中断，中断前已安全捕获 ${parsedComments.length} 条评论并存入检查点`;
+      if (process.stdout.isTTY) {
+        spinner.stop(msg);
+      } else {
+        logger.warn(msg);
+      }
+      return parsedComments;
     }
 
     const finalCount = Math.min(parsedComments.length, limit);
@@ -1096,7 +1204,7 @@ export class WeiboScraper {
     let keepFetching = true;
     const seenSubMaxIds = new Set<string>();
 
-    while (keepFetching && subComments.length < maxSub) {
+    while (keepFetching && subComments.length < maxSub && !this.isAborted) {
       if (seenSubMaxIds.has(maxId)) {
         break;
       }
@@ -1398,14 +1506,8 @@ export class WeiboScraper {
         }
       }
 
-      // Fetch comments if configured
-      let comments: ParsedComment[] = [];
-      if (config.SCRAPE_COMMENTS && parsedPost.comments_count > 0) {
-        comments = await this.scrapeComments(parsedPost.id, uid);
-      }
-
-      // Run storage pipeline to download media and write files
-      await this.pipeline.process(parsedPost, comments, screenName, uid);
+      // Fetch comments and process storage pipeline (with chunking threshold support)
+      const comments = await this.processPostWithComments(parsedPost, screenName, uid);
       const postDateStr = parsedPost.time.substring(0, 10);
       this.markPostAsCrawled(uid, postDateStr, parsedPost.id);
 
@@ -1423,7 +1525,9 @@ export class WeiboScraper {
         ? (parsedPost.content.length > 60 ? parsedPost.content.substring(0, 60) + '...' : parsedPost.content)
         : '（无正文或仅含媒体）';
 
-      let msg = `🎯 <b>【单条微博定向爬取完成报告】</b>\n\n`;
+      let msg = this.isAborted
+        ? `⚠️ <b>【单条微博定向爬取中断保存报告】</b>\n\n`
+        : `🎯 <b>【单条微博定向爬取完成报告】</b>\n\n`;
       msg += `👤 目标博主: <b>${escapeHtml(screenName)}</b> (${uid})\n`;
       msg += `🆔 微博 ID: <code>${mid}</code>\n`;
       msg += `🔗 博文链接: https://weibo.com/${uid}/${mid}\n`;
@@ -1448,7 +1552,9 @@ export class WeiboScraper {
       msg += `💾 存储归档: ${escapeHtml(folderRelPath)}\n`;
       msg += `   └─ [${formats}${dbText}] 已同步备份\n`;
 
-      msg += `\n✨ <b>单条微博定向备份成功！</b>`;
+      msg += this.isAborted
+        ? `\n⚠️ <b>任务已被手动中断，但已成功安全归档当前全部进度！</b>`
+        : `\n✨ <b>单条微博定向备份成功！</b>`;
 
       const durationSec = parseFloat((durationMs / 1000).toFixed(1));
       const hookContext: HookContext = {

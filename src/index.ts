@@ -15,6 +15,8 @@ process.on('uncaughtException', (err) => {
   logger.error('Uncaught Exception:', err);
 });
 
+let activeScraper: WeiboScraper | null = null;
+
 async function start() {
   const args = process.argv;
   const isCrawlArg = args.some(arg => arg === '-c' || arg === '--crawl-post');
@@ -36,7 +38,28 @@ async function start() {
   }
 
   // Register graceful shutdown handlers
+  let isShuttingDown = false;
   const handleShutdown = async (signal: string) => {
+    if (isShuttingDown) {
+      logger.warn(`收到重复中断信号，正在强制立即退出...`);
+      process.exit(130);
+    }
+
+    if (activeScraper && !activeScraper.isAborting()) {
+      isShuttingDown = true;
+      logger.warn(`⚠️ 收到 ${signal} (Ctrl+C) 信号。正在安全收尾当前抓取任务并将已获取内容落盘，请稍候...（如需强制立即退出请再次按 Ctrl+C）`);
+      activeScraper.requestAbort();
+
+      // 15 秒超时保底
+      setTimeout(async () => {
+        logger.warn('收尾超时，强制结束进程。');
+        try { await closeDb(); } catch {}
+        process.exit(130);
+      }, 15000).unref();
+      return;
+    }
+
+    isShuttingDown = true;
     logger.warn(`收到 ${signal} 信号。正在执行退出...`);
     try {
       cleanupActiveHookProcess();
@@ -101,6 +124,7 @@ async function start() {
     const target = args[crawlIdx + 1];
     const isDate = /^\d{4}-\d{2}-\d{2}$/.test(target);
     const scraper = new WeiboScraper();
+    activeScraper = scraper;
     let res;
 
     if (isDate) {
@@ -235,6 +259,7 @@ async function start() {
 
 async function runSingleScrape() {
   const scraper = new WeiboScraper();
+  activeScraper = scraper;
   try {
     const { getCrawlModeSummary } = require('./utils/userFileHelper');
     const crawlInfo = getCrawlModeSummary();
