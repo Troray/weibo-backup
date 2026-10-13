@@ -274,9 +274,9 @@ export class BloggerProfileManager {
   }
 
   /**
-   * 下载媒体文件（头像、手机背景、网页背景），使用原子重命名防范损坏
+   * 下载媒体文件（头像、手机背景、网页背景），内置重试与原子重命名防范损坏
    */
-  private async downloadMediaFile(url: string, targetPath: string): Promise<boolean> {
+  private async downloadMediaFile(url: string, targetPath: string, maxRetries: number = 3): Promise<boolean> {
     if (!url) return false;
     const dir = path.dirname(targetPath);
     if (!fs.existsSync(dir)) {
@@ -288,33 +288,39 @@ export class BloggerProfileManager {
       return true;
     }
 
-    const tempPath = `${targetPath}.tmp.${Date.now()}`;
-    try {
-      const response = await axios({
-        url,
-        method: 'GET',
-        responseType: 'arraybuffer',
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Referer': 'https://weibo.com/'
-        },
-        proxy: getAxiosProxyConfig(),
-        timeout: 20000
-      });
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      const tempPath = `${targetPath}.tmp.${Date.now()}`;
+      try {
+        const response = await axios({
+          url,
+          method: 'GET',
+          responseType: 'arraybuffer',
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Referer': 'https://weibo.com/'
+          },
+          proxy: getAxiosProxyConfig(),
+          timeout: 20000
+        });
 
-      if (response.status === 200 && response.data) {
-        fs.writeFileSync(tempPath, Buffer.from(response.data));
-        fs.renameSync(tempPath, targetPath);
-        return true;
+        if (response.status === 200 && response.data) {
+          fs.writeFileSync(tempPath, Buffer.from(response.data));
+          fs.renameSync(tempPath, targetPath);
+          return true;
+        }
+      } catch (err: any) {
+        if (fs.existsSync(tempPath)) {
+          try { fs.unlinkSync(tempPath); } catch {}
+        }
+        if (attempt < maxRetries) {
+          logger.warn(`下载博主资料媒体重试 (${attempt}/${maxRetries}) (${url}): ${err.message}`);
+          await new Promise(r => setTimeout(r, 1000 * attempt));
+        } else {
+          logger.warn(`下载博主资料媒体失败 (${url}): ${err.message}`);
+        }
       }
-      return false;
-    } catch (err: any) {
-      if (fs.existsSync(tempPath)) {
-        try { fs.unlinkSync(tempPath); } catch {}
-      }
-      logger.warn(`下载博主资料媒体失败 (${url}): ${err.message}`);
-      return false;
     }
+    return false;
   }
 
   /**
@@ -478,21 +484,26 @@ export class BloggerProfileManager {
     const coverPhoneLocalPath = path.join('profile', 'cover_phone.jpg').replace(/\\/g, '/');
     const coverWebLocalPath = path.join('profile', 'cover_web.jpg').replace(/\\/g, '/');
 
-    if (avatarUrl) {
+    const avatarLocalFull = path.join(userDir, 'profile', 'avatar.jpg');
+    const coverWebLocalFull = path.join(userDir, 'profile', 'cover_web.jpg');
+    const coverPhoneLocalFull = path.join(userDir, 'profile', 'cover_phone.jpg');
+
+    let hasAvatar = fs.existsSync(avatarLocalFull) && fs.statSync(avatarLocalFull).size > 0;
+    if (!hasAvatar && avatarUrl) {
       logger.info(`正在初次下载博主头像: ${avatarUrl}`);
-      await this.downloadMediaFile(avatarUrl, path.join(userDir, 'profile', 'avatar.jpg'));
+      hasAvatar = await this.downloadMediaFile(avatarUrl, avatarLocalFull);
     }
 
-    let hasCoverWeb = false;
-    if (coverWebUrl) {
+    let hasCoverWeb = fs.existsSync(coverWebLocalFull) && fs.statSync(coverWebLocalFull).size > 0;
+    if (!hasCoverWeb && coverWebUrl) {
       logger.info(`正在初次下载网页端主页背景图片 (超清原画): ${coverWebUrl}`);
-      hasCoverWeb = await this.downloadMediaFile(coverWebUrl, path.join(userDir, 'profile', 'cover_web.jpg'));
+      hasCoverWeb = await this.downloadMediaFile(coverWebUrl, coverWebLocalFull);
     }
 
-    let hasCoverPhone = false;
-    if (coverPhoneUrl) {
+    let hasCoverPhone = fs.existsSync(coverPhoneLocalFull) && fs.statSync(coverPhoneLocalFull).size > 0;
+    if (!hasCoverPhone && coverPhoneUrl) {
       logger.info(`正在初次下载手机端主页背景图片: ${coverPhoneUrl}`);
-      hasCoverPhone = await this.downloadMediaFile(coverPhoneUrl, path.join(userDir, 'profile', 'cover_phone.jpg'));
+      hasCoverPhone = await this.downloadMediaFile(coverPhoneUrl, coverPhoneLocalFull);
     }
 
     const updatedAt = new Date().toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' });
@@ -529,9 +540,9 @@ export class BloggerProfileManager {
       blogUrl,
       media: {
         avatarUrl,
-        avatarLocalPath,
+        avatarLocalPath: hasAvatar ? avatarLocalPath : '',
         coverPhoneUrl,
-        coverPhoneLocalPath: hasCoverPhone ? coverPhoneLocalPath : '',
+        coverPhoneLocalPath: hasCoverPhone ? coverPhoneLocalPath : (hasCoverWeb ? '同网页端背景' : ''),
         coverWebUrl: coverWebUrl || undefined,
         coverWebLocalPath: hasCoverWeb ? coverWebLocalPath : undefined
       },
@@ -600,9 +611,9 @@ export class BloggerProfileManager {
     text += `${data.description || '博主暂未设置个人简介。'}\n\n`;
 
     text += `【多媒体资源】\n`;
-    text += `头像：${data.media.avatarLocalPath || '无'} (在线链接: ${data.media.avatarUrl || '无'})\n`;
-    text += `网页端背景图片：${data.media.coverWebLocalPath || '默认背景'} (在线链接: ${data.media.coverWebUrl || '无'})\n`;
-    text += `手机端背景图片：${data.media.coverPhoneLocalPath || '无'} (在线链接: ${data.media.coverPhoneUrl || '无'})\n\n`;
+    text += `头像：${data.media.avatarLocalPath || '无'}\n`;
+    text += `网页端背景图片：${data.media.coverWebLocalPath || '默认背景'}\n`;
+    text += `手机端背景图片：${data.media.coverPhoneLocalPath || '默认背景'}\n\n`;
 
     text += `【主页链接】\n`;
     text += `微博主页：${data.pageUrl}\n`;
