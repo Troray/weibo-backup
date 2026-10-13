@@ -25,6 +25,7 @@ import {
 } from '../utils/userFileHelper';
 import { executePostScript, formatHookSummaryForReport, HookContext } from '../utils/postScriptRunner';
 import { escapeHtml } from '../utils/htmlHelper';
+import { BloggerProfileManager } from './BloggerProfileManager';
 
 // Re-export for backward compatibility
 export { SessionExpiredError };
@@ -303,8 +304,10 @@ export class WeiboScraper {
 
       for (const uid of uids) {
         const userEntry = allUsers.find((u: any) => u.uid === uid && !u.isCommented);
+        // 自动同步并归档博主详细资料（<UID>.txt 及 profile/ 头像与背景图片）
+        const profile = await BloggerProfileManager.getInstance().ensureBloggerProfile(uid, userEntry?.name);
         const cursor = this.getCursorForUser(uid);
-        const bloggerName = (await this.getScreenName(uid)) || uid;
+        const bloggerName = profile?.screenName || (await this.getScreenName(uid)) || uid;
 
         let startDateStr = config.START_DATE;
         let startDateTimeStr = '';
@@ -1278,21 +1281,14 @@ export class WeiboScraper {
       return knownName;
     }
 
-    // 2. 只有当本地没有昵称记录（如首次仅填写了 UID）时，才在线请求一次接口
+    // 2. 只有当本地没有昵称记录（如首次仅填写了 UID）时，通过博主资料管理器获取
     try {
-      logger.info(`博主 UID ${uid} 本地无昵称记录，正在初次从微博接口获取昵称...`);
-      const response = await this.makeRequest(`https://weibo.com/ajax/profile/info?uid=${uid}`, {
-        method: 'GET',
-        headers: { 'Referer': `https://weibo.com/u/${uid}` },
-        responseType: 'json'
-      });
-      const profileInfo = response.data;
-      if (profileInfo?.data?.user?.screen_name) {
-        const name = profileInfo.data.user.screen_name;
-        this.screenNameCache.set(uid, name);
-        // 回写到 userid.txt 文件，后续所有爬取直接读取文件，永久无需再次请求网络
-        this.saveBloggerNameToUserFile(uid, name);
-        return name;
+      logger.info(`博主 UID ${uid} 本地无昵称记录，正在从微博接口获取博主资料与昵称...`);
+      const profile = await BloggerProfileManager.getInstance().ensureBloggerProfile(uid);
+      if (profile?.screenName) {
+        this.screenNameCache.set(uid, profile.screenName);
+        this.saveBloggerNameToUserFile(uid, profile.screenName);
+        return profile.screenName;
       }
     } catch (err) {
       logger.warn(`获取博主 UID (${uid}) 的详情失败，将使用默认标识继续运行。`, err);
@@ -1380,6 +1376,9 @@ export class WeiboScraper {
       }
 
       logger.info(`已解析作者: ${screenName} (UID: ${uid})`);
+
+      // 确保单条定向抓取的目标博主详细资料（<UID>.txt 及 profile/ 头像与背景图片）已生成归档
+      await BloggerProfileManager.getInstance().ensureBloggerProfile(uid, screenName);
 
       // Fetch long text if flag is set
       if (postData.isLongText) {
@@ -1503,7 +1502,10 @@ export class WeiboScraper {
    * Crawl all posts of a specific date for a specific UID
    */
   async crawlDateForUser(uid: string, dateStr: string, triggerSource: 'CLI' | 'TG_BOT' = 'CLI'): Promise<{ success: boolean; message: string }> {
-    const bloggerName = this.getBloggerName(uid) || uid;
+    // 自动同步并归档博主详细资料（<UID>.txt 及 profile/ 头像与背景图片）
+    const knownName = this.getBloggerName(uid);
+    const profile = await BloggerProfileManager.getInstance().ensureBloggerProfile(uid, knownName);
+    const bloggerName = profile?.screenName || (await this.getScreenName(uid)) || knownName || uid;
     const displayName = bloggerName === uid ? uid : `${bloggerName} (${uid})`;
     logger.info(`正在对 ${displayName} 在日期 ${dateStr} 启动定向爬取...`);
 

@@ -1,3 +1,4 @@
+import * as path from 'path';
 import { WeiboScraper } from './scraper/WeiboScraper';
 import { closeDb } from './storage/db';
 import { logger } from './utils/logger';
@@ -61,11 +62,13 @@ async function start() {
   node dist/index.js                  默认运行模式 (启动增量同步，或启动 Telegram 交互机器人)
   node dist/index.js -c <日期/微博ID>   定向爬取指定日期或单条微博 (配合 -u 指定博主)
   node dist/index.js -d <日期/微博ID>   定向删除指定日期或单条微博的备份 (配合 -u 指定博主)
+  node dist/index.js -p [UID]         定向获取/更新博主详细资料 (配合 -u 或直接指定 UID)
 
 选项:
   -c, --crawl-post   定向爬取。值可以是 YYYY-MM-DD 格式日期，或微博链接/MID/BID
   -d, --delete-post  定向物理删除备份。值可以是 YYYY-MM-DD 格式日期，或微博链接/MID/BID
-  -u, --uid          指定博主的微博 UID (用于多博主配置时限定 -c/-d 日期操作的目标博主)
+  -p, --profile      定向获取/更新博主详细资料 (配合 -u 或直接指定 UID)
+  -u, --uid          指定博主的微博 UID (用于多博主配置时限定 -c/-d/-p 操作的目标博主)
   -h, --help         显示此帮助信息
 `);
     process.exit(0);
@@ -184,6 +187,25 @@ async function start() {
     } else {
       logger.error(`CLI 运行失败:\n${res.message}`);
       await Notifier.sendText(`❌ 【定向物理删除失败】\n\n${res.message}`);
+      await closeDb();
+      process.exit(1);
+    }
+  }
+
+  const profileIdx = args.findIndex(arg => arg === '-p' || arg === '--profile');
+  if (profileIdx > -1) {
+    const specifiedTarget = args[profileIdx + 1];
+    const targetUid = (specifiedTarget && /^\d+$/.test(specifiedTarget)) ? specifiedTarget : getOrResolveUid();
+    const { BloggerProfileManager } = require('./scraper/BloggerProfileManager');
+    logger.info(`CLI：开始定向获取/归档博主 (UID: ${targetUid}) 的详细资料...`);
+    const profile = await BloggerProfileManager.getInstance().ensureBloggerProfile(targetUid, undefined, { force: true });
+    if (profile) {
+      const outPath = path.join(config.OUTPUT_DIR, profile.screenName, `${targetUid}.txt`);
+      logger.info(`✅ 博主 ${profile.screenName} (${targetUid}) 资料已成功归档至 ${outPath}`);
+      await closeDb();
+      process.exit(0);
+    } else {
+      logger.error(`❌ 获取博主资料失败。`);
       await closeDb();
       process.exit(1);
     }

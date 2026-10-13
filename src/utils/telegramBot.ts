@@ -22,6 +22,7 @@ import { deletePostData } from '../storage/deleteUtility';
 import * as fs from 'fs';
 import * as path from 'path';
 import { cleanupActiveHookProcess } from './postScriptRunner';
+import { escapeHtml } from './htmlHelper';
 
 export class TelegramBot {
   private static running = false;
@@ -150,6 +151,8 @@ export class TelegramBot {
         await this.handleDeletePost(parts);
       } else if (command === '/user' || command === '/userid') {
         await this.handleUserCommand(parts);
+      } else if (command === '/profile') {
+        await this.handleProfileCommand(parts);
       } else if (command === '/env') {
         await this.handleEnvCommand(parts, text);
       } else {
@@ -186,6 +189,7 @@ export class TelegramBot {
 • \`/user enable\` <UID> - 重新启用指定博主。
 • \`/user date\` <UID> <YYYY-MM-DD> - 为指定博主设置自定义的同步起点日期游标。
 • \`/user enddate\` <UID> <YYYY-MM-DD|clear> - 设置或清除指定博主的自定义结束时间。
+• \`/user profile\` <UID> (或 \`/profile\` <UID>) - 查看或重新获取归档指定博主的详细资料。
 
 环境变量（.env）配置管理：
 • /env list - 显示所有环境变量配置值。
@@ -409,8 +413,43 @@ export class TelegramBot {
           await Notifier.sendText(`❌ 未找到 UID 为 ${uid} 的博主。`);
         }
       }
+    } else if (sub === 'profile' || sub === 'info') {
+      await this.handleProfileCommand(parts.slice(1));
     } else {
-      await Notifier.sendText("❓ 未知子命令。请使用 /user list, /user add, /user del, /user disable, /user enable, /user date, 或 /user enddate。");
+      await Notifier.sendText("❓ 未知子命令。请使用 /user list, /user add, /user del, /user disable, /user enable, /user date, /user enddate, 或 /user profile。");
+    }
+  }
+
+  private static async handleProfileCommand(parts: string[]): Promise<void> {
+    const uid = parts[1];
+    if (!uid || !/^\d+$/.test(uid)) {
+      await Notifier.sendText("⚠️ 格式错误。正确格式：/profile <UID> 或 /user profile <UID>");
+      return;
+    }
+
+    const { BloggerProfileManager } = require('../scraper/BloggerProfileManager');
+    await Notifier.sendText(`⏳ 正在获取/归档博主 (${uid}) 的详细资料，请稍候...`);
+    try {
+      const profile = await BloggerProfileManager.getInstance().ensureBloggerProfile(uid, undefined, { force: true });
+      if (profile) {
+        let msg = `👤 <b>博主详细资料归档报告</b>\n\n`;
+        msg += `• <b>UID</b>: <code>${profile.uid}</code>\n`;
+        msg += `• <b>昵称</b>: <b>${escapeHtml(profile.screenName)}</b>\n`;
+        msg += `• <b>性别</b>: ${profile.gender} | <b>所在地</b>: ${escapeHtml(profile.location)} (${escapeHtml(profile.ipLocation)})\n`;
+        msg += `• <b>阳光信用</b>: ${escapeHtml(profile.sunshineCredit)} | <b>注册时间</b>: ${profile.createdAt}\n`;
+        msg += `• <b>认证信息</b>: ${escapeHtml(profile.verified ? (profile.verifiedReason || profile.verifiedType) : '未认证')}\n`;
+        msg += `• <b>粉丝数量</b>: ${profile.followersCountStr} (${profile.followersCount.toLocaleString()} 人)\n`;
+        msg += `• <b>互动数据</b>: 转评赞总计 ${profile.totalInteractions} (评 ${profile.commentCount} | 转 ${profile.repostCount} | 赞 ${profile.likeCount})\n`;
+        msg += `• <b>微博总量</b>: ${profile.statusesCount} 条\n\n`;
+        const relPath = path.join(config.OUTPUT_DIR, profile.screenName, `${profile.uid}.txt`).replace(/\\/g, '/');
+        msg += `📁 <b>资料归档路径</b>: <code>${relPath}</code>`;
+        await Notifier.sendText(msg);
+      } else {
+        await Notifier.sendText(`❌ 获取博主 (${uid}) 资料失败。`);
+      }
+    } catch (err: any) {
+      logger.error(`获取博主资料出错:`, err);
+      await Notifier.sendText(`❌ 获取博主资料出错: ${err.message || err}`);
     }
   }
 
