@@ -7,6 +7,7 @@ import * as cliProgress from 'cli-progress';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 import { ParsedComment } from '../scraper/parser';
+import { buildMediaFilename } from '../utils/mediaHelper';
 
 export interface DownloadTask {
   url: string;
@@ -87,6 +88,7 @@ export class MediaDownloader {
    */
   async downloadPostMedia(
     postId: string,
+    postTime: string | Date | undefined,
     cdnImages: string[],
     cdnVideos: string[],
     cdnLivePhotos: string[],
@@ -110,54 +112,54 @@ export class MediaDownloader {
 
     // Queue images
     if (shouldDownloadImages) {
-      for (const url of cdnImages) {
-        const filename = this.getFilenameFromUrl(url, '.jpg');
+      cdnImages.forEach((url, i) => {
+        const filename = buildMediaFilename(postTime, postId, i + 1, url, '.jpg');
         tasks.push({
           url,
           destPath: path.join(imgDir, filename),
           postId,
           mediaType: 'image'
         });
-      }
+      });
     }
 
     // Queue videos
     if (shouldDownloadVideos) {
-      for (const url of cdnVideos) {
-        const filename = this.getFilenameFromUrl(url, '.mp4');
+      cdnVideos.forEach((url, i) => {
+        const filename = buildMediaFilename(postTime, postId, i + 1, url, '.mp4');
         tasks.push({
           url,
           destPath: path.join(videoDir, filename),
           postId,
           mediaType: 'video'
         });
-      }
+      });
     }
 
     // Queue live photos
     if (shouldDownloadLivePhotos) {
-      for (const url of cdnLivePhotos) {
-        const filename = this.getFilenameFromUrl(url, '.mov');
+      cdnLivePhotos.forEach((url, i) => {
+        const filename = buildMediaFilename(postTime, postId, i + 1, url, '.mov');
         tasks.push({
           url,
           destPath: path.join(livePhotoDir, filename),
           postId,
           mediaType: 'livephoto'
         });
-      }
+      });
     }
 
     // Queue audios
     if (shouldDownloadAudios) {
-      for (const url of cdnAudios) {
-        const filename = this.getFilenameFromUrl(url, '.aac');
+      cdnAudios.forEach((url, i) => {
+        const filename = buildMediaFilename(postTime, postId, i + 1, url, '.aac');
         tasks.push({
           url,
           destPath: path.join(audioDir, filename),
           postId,
           mediaType: 'audio'
         });
-      }
+      });
     }
 
     if (tasks.length === 0) {
@@ -168,34 +170,39 @@ export class MediaDownloader {
     this.totalTasks += tasks.length;
     this.updateProgress();
 
+    // Run parallel downloads
+    const results = await this.runWithLimit(this.limit, tasks, async (task) => {
+      const sub = task.mediaType === 'image' ? 'img' : task.mediaType === 'video' ? 'video' : task.mediaType === 'livephoto' ? 'livephoto' : 'audio';
+      const relativePath = path.join(monthSubDir, sub, path.basename(task.destPath)).replace(/\\/g, '/');
+      
+      const success = await this.downloadWithRetry(task.url, task.destPath);
+      this.completedTasks++;
+      this.updateProgress();
+      return { task, success, relativePath };
+    });
+
+    if (this.completedTasks >= this.totalTasks) {
+      this.finishProgress();
+    }
+
+    // 严格按博文原生媒体序号排列，彻底避免并发下载完成先后顺序不一导致的乱序问题
     const localImages: string[] = [];
     const localVideos: string[] = [];
     const localLivePhotos: string[] = [];
     const localAudios: string[] = [];
 
-    // Run parallel downloads
-    await this.runWithLimit(this.limit, tasks, async (task) => {
-      const sub = task.mediaType === 'image' ? 'img' : task.mediaType === 'video' ? 'video' : task.mediaType === 'livephoto' ? 'livephoto' : 'audio';
-      const relativePath = path.join(monthSubDir, sub, path.basename(task.destPath)).replace(/\\/g, '/');
-      
-      const success = await this.downloadWithRetry(task.url, task.destPath);
-      if (success) {
-        if (task.mediaType === 'image') {
-          localImages.push(relativePath);
-        } else if (task.mediaType === 'video') {
-          localVideos.push(relativePath);
-        } else if (task.mediaType === 'livephoto') {
-          localLivePhotos.push(relativePath);
-        } else if (task.mediaType === 'audio') {
-          localAudios.push(relativePath);
+    for (const res of results) {
+      if (res && res.success) {
+        if (res.task.mediaType === 'image') {
+          localImages.push(res.relativePath);
+        } else if (res.task.mediaType === 'video') {
+          localVideos.push(res.relativePath);
+        } else if (res.task.mediaType === 'livephoto') {
+          localLivePhotos.push(res.relativePath);
+        } else if (res.task.mediaType === 'audio') {
+          localAudios.push(res.relativePath);
         }
       }
-      this.completedTasks++;
-      this.updateProgress();
-    });
-
-    if (this.completedTasks >= this.totalTasks) {
-      this.finishProgress();
     }
 
     return { localImages, localVideos, localLivePhotos, localAudios };
@@ -280,6 +287,22 @@ export class MediaDownloader {
       return true;
     }
 
+    // 智能复用历史本地文件：若新规范命名的目标文件不存在，但同目录下已存在历史旧哈希命名的文件，自动重命名复用，避免消耗网络带宽
+    const legacyFilename = this.getFilenameFromUrl(url, path.extname(destPath) || '.jpg');
+    if (legacyFilename && legacyFilename !== path.basename(destPath)) {
+      const legacyPath = path.join(dir, legacyFilename);
+      if (fs.existsSync(legacyPath) && fs.statSync(legacyPath).size > 0) {
+        try {
+          fs.renameSync(legacyPath, destPath);
+          logger.info(`[本地媒体复用] 发现已存在历史文件 ${legacyFilename}，已自动更名为标准规范文件名 ${path.basename(destPath)}`);
+          return true;
+        } catch (renameErr) {
+          logger.debug(`重命名历史文件失败，将正常请求下载:`, renameErr);
+        }
+      }
+    }
+
+    const tempPath = `${destPath}.tmp.${Date.now()}`;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         const response = await fetch(url, {
@@ -298,12 +321,17 @@ export class MediaDownloader {
           throw new Error('Response body is empty');
         }
 
-        const writeStream = fs.createWriteStream(destPath);
+        const writeStream = fs.createWriteStream(tempPath);
         await pipeline(Readable.fromWeb(response.body as any), writeStream);
         
+        // 传输完整后原子重命名替换，杜绝断网或异常中断导致残留破损文件
+        fs.renameSync(tempPath, destPath);
         return true;
       } catch (err: any) {
-        // Clean up partial corrupt file immediately on failure
+        // Clean up partial corrupt temp file immediately on failure
+        if (fs.existsSync(tempPath)) {
+          try { fs.unlinkSync(tempPath); } catch {}
+        }
         if (fs.existsSync(destPath)) {
           try { fs.unlinkSync(destPath); } catch {}
         }
