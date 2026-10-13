@@ -303,9 +303,9 @@ export class WeiboScraper {
       const allUsers = isUserListFile() ? readUsers() : [];
 
       for (const uid of uids) {
-        // 自动同步并归档博主详细资料（博主资料.md、博主资料.json 及 profile/ 头像与背景）
-        const profile = await BloggerProfileManager.getInstance().ensureBloggerProfile(uid);
         const userEntry = allUsers.find((u: any) => u.uid === uid && !u.isCommented);
+        // 自动同步并归档博主详细资料（<UID>.txt 及 profile/ 头像与背景图片）
+        const profile = await BloggerProfileManager.getInstance().ensureBloggerProfile(uid, userEntry?.name);
         const cursor = this.getCursorForUser(uid);
         const bloggerName = profile?.screenName || (await this.getScreenName(uid)) || uid;
 
@@ -1377,7 +1377,7 @@ export class WeiboScraper {
 
       logger.info(`已解析作者: ${screenName} (UID: ${uid})`);
 
-      // 确保单条定向抓取的目标博主详细资料（博主资料.md、博主资料.json 及 profile/ 头像与背景）已生成归档
+      // 确保单条定向抓取的目标博主详细资料（<UID>.txt 及 profile/ 头像与背景图片）已生成归档
       await BloggerProfileManager.getInstance().ensureBloggerProfile(uid, screenName);
 
       // Fetch long text if flag is set
@@ -1502,9 +1502,10 @@ export class WeiboScraper {
    * Crawl all posts of a specific date for a specific UID
    */
   async crawlDateForUser(uid: string, dateStr: string, triggerSource: 'CLI' | 'TG_BOT' = 'CLI'): Promise<{ success: boolean; message: string }> {
-    // 自动同步并归档博主详细资料（博主资料.md、博主资料.json 及 profile/ 头像与背景）
-    const profile = await BloggerProfileManager.getInstance().ensureBloggerProfile(uid);
-    const bloggerName = profile?.screenName || this.getBloggerName(uid) || uid;
+    // 自动同步并归档博主详细资料（<UID>.txt 及 profile/ 头像与背景图片）
+    const knownName = this.getBloggerName(uid);
+    const profile = await BloggerProfileManager.getInstance().ensureBloggerProfile(uid, knownName);
+    const bloggerName = profile?.screenName || (await this.getScreenName(uid)) || knownName || uid;
     const displayName = bloggerName === uid ? uid : `${bloggerName} (${uid})`;
     logger.info(`正在对 ${displayName} 在日期 ${dateStr} 启动定向爬取...`);
 

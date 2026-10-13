@@ -224,6 +224,7 @@ export async function upsertComment(db: Knex, comment: any): Promise<void> {
 }
 
 export async function upsertUserProfile(db: Knex, profile: any): Promise<void> {
+  await initializeSchema(db);
   const existing = await db('user_profiles').where({ uid: profile.uid }).first();
   const dbData = {
     uid: profile.uid,

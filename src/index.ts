@@ -1,3 +1,4 @@
+import * as path from 'path';
 import { WeiboScraper } from './scraper/WeiboScraper';
 import { closeDb } from './storage/db';
 import { logger } from './utils/logger';
@@ -199,7 +200,8 @@ async function start() {
     logger.info(`CLI：开始定向获取/归档博主 (UID: ${targetUid}) 的详细资料...`);
     const profile = await BloggerProfileManager.getInstance().ensureBloggerProfile(targetUid, undefined, { force: true });
     if (profile) {
-      logger.info(`✅ 博主 ${profile.screenName} (${targetUid}) 资料已成功归档至 ${config.OUTPUT_DIR}/${profile.screenName}/${targetUid}.txt`);
+      const outPath = path.join(config.OUTPUT_DIR, profile.screenName, `${targetUid}.txt`);
+      logger.info(`✅ 博主 ${profile.screenName} (${targetUid}) 资料已成功归档至 ${outPath}`);
       await closeDb();
       process.exit(0);
     } else {

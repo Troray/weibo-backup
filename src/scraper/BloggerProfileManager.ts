@@ -83,7 +83,7 @@ export function parseBirthdayAndConstellation(rawBirthday?: string): { birthday:
     }
   }
 
-  let cleanDate = str.replace(foundZodiac, '').trim();
+  let cleanDate = str.replace(foundZodiac, '').replace(/日$/, '').trim();
   const dateMatch = cleanDate.match(/(?:(\d{4})[-/年])?(\d{1,2})[-/月](\d{1,2})/);
   if (dateMatch) {
     const month = parseInt(dateMatch[2], 10);
@@ -91,6 +91,10 @@ export function parseBirthdayAndConstellation(rawBirthday?: string): { birthday:
     if (!foundZodiac && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
       foundZodiac = getConstellation(month, day);
     }
+    // 标准化为 YYYY-MM-DD 或 MM-DD
+    const mStr = dateMatch[2].padStart(2, '0');
+    const dStr = dateMatch[3].padStart(2, '0');
+    cleanDate = dateMatch[1] ? `${dateMatch[1]}-${mStr}-${dStr}` : `${mStr}-${dStr}`;
   }
 
   return {
@@ -145,16 +149,25 @@ export function parseCareer(career: any, company: any): string {
   if (career) {
     if (typeof career === 'string' && career.trim()) {
       if (!parts.includes(career.trim())) parts.push(career.trim());
+    } else if (Array.isArray(career)) {
+      for (const item of career) {
+        if (typeof item === 'string' && item.trim()) {
+          if (!parts.includes(item.trim())) parts.push(item.trim());
+        } else if (item && typeof item === 'object') {
+          const comp = item.company?.trim();
+          const pos = item.position?.trim();
+          const record = [comp, pos].filter(Boolean).join(' - ');
+          if (record && !parts.includes(record)) parts.push(record);
+        }
+      }
     } else if (typeof career === 'object') {
-      if (career.company && typeof career.company === 'string' && !parts.includes(career.company.trim())) {
-        parts.push(career.company.trim());
-      }
-      if (career.position && typeof career.position === 'string') {
-        parts.push(career.position.trim());
-      }
+      const comp = career.company?.trim();
+      const pos = career.position?.trim();
+      const record = [comp, pos].filter(Boolean).join(' - ');
+      if (record && !parts.includes(record)) parts.push(record);
     }
   }
-  return parts.join(' - ');
+  return parts.join('；');
 }
 
 /**
@@ -212,12 +225,174 @@ export function formatRealAuth(detail: any): string {
 export class BloggerProfileManager {
   private static instance: BloggerProfileManager;
   private syncedUids = new Set<string>();
+  private profileCache = new Map<string, BloggerProfileData>();
 
   public static getInstance(): BloggerProfileManager {
     if (!BloggerProfileManager.instance) {
       BloggerProfileManager.instance = new BloggerProfileManager();
     }
     return BloggerProfileManager.instance;
+  }
+
+  /**
+   * 从本地已存在的 <UID>.txt 资料文件中逆向解析博主数据（供缓存命中时复用，无需重复请求网络）
+   */
+  public parseProfileFromTxt(txtPath: string, uid: string): BloggerProfileData | null {
+    try {
+      if (!fs.existsSync(txtPath) || fs.statSync(txtPath).size === 0) return null;
+      const content = fs.readFileSync(txtPath, 'utf8');
+      const lines = content.split('\n');
+
+      let screenName = '';
+      let gender = '未公开';
+      let birthday = '';
+      let constellation = '';
+      let location = '未公开';
+      let ipLocation = '未公开';
+      let education = '未公开';
+      let career = '未公开';
+      let sunshineCredit = '未公开';
+      let createdAt = '未公开';
+      let verified = false;
+      let verifiedReason = '';
+      let verifiedType = '';
+      let realAuth = '未公开';
+      let vipInfo = '普通用户';
+      let followersCountStr = '0';
+      let followersCount = 0;
+      let friendsCount = 0;
+      let statusesCount = 0;
+      let totalInteractions = '0';
+      let repostCount = '0';
+      let commentCount = '0';
+      let likeCount = '0';
+      let friendInfo = '';
+      let description = '';
+      let pageUrl = `https://weibo.com/u/${uid}`;
+      let blogUrl = '';
+      const tags: string[] = [];
+      let updatedAt = '';
+
+      let currentSection = '';
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith('=====')) continue;
+        if (line.startsWith('【') && line.endsWith('】')) {
+          currentSection = line;
+          continue;
+        }
+
+        if (currentSection === '') {
+          if (line.startsWith('昵称：')) screenName = line.replace('昵称：', '').trim();
+          else if (line.startsWith('性别：')) gender = line.replace('性别：', '').trim();
+          else if (line.startsWith('生日：')) birthday = line.replace('生日：', '').trim();
+          else if (line.startsWith('星座：')) constellation = line.replace('星座：', '').trim();
+          else if (line.startsWith('所在地：')) location = line.replace('所在地：', '').trim();
+          else if (line.startsWith('IP属地：')) ipLocation = line.replace('IP属地：', '').trim();
+          else if (line.startsWith('学习经历：')) education = line.replace('学习经历：', '').trim();
+          else if (line.startsWith('工作经历：')) career = line.replace('工作经历：', '').trim();
+          else if (line.startsWith('阳光信用：')) sunshineCredit = line.replace('阳光信用：', '').trim();
+          else if (line.startsWith('注册时间：')) createdAt = line.replace('注册时间：', '').trim();
+          else if (line.startsWith('认证信息：')) {
+            const v = line.replace('认证信息：', '').trim();
+            if (v && v !== '未认证') {
+              verified = true;
+              verifiedReason = v;
+            }
+          }
+          else if (line.startsWith('实名认证：')) realAuth = line.replace('实名认证：', '').trim();
+          else if (line.startsWith('会员等级：')) vipInfo = line.replace('会员等级：', '').trim();
+        } else if (currentSection === '【社交与互动数据】') {
+          if (line.startsWith('粉丝数：')) {
+            const match = line.replace('粉丝数：', '').trim();
+            const cntMatch = match.match(/\(([\d,]+)\s*人\)/);
+            if (cntMatch) {
+              followersCount = parseInt(cntMatch[1].replace(/,/g, ''), 10) || 0;
+            }
+            followersCountStr = match.split('(')[0].trim();
+          } else if (line.startsWith('关注数：')) {
+            friendsCount = parseInt(line.replace(/关注数：|\s*人/g, '').replace(/,/g, ''), 10) || 0;
+          } else if (line.startsWith('微博总数：')) {
+            statusesCount = parseInt(line.replace(/微博总数：|\s*条/g, '').replace(/,/g, ''), 10) || 0;
+          } else if (line.startsWith('转评赞总数：')) {
+            totalInteractions = line.replace('转评赞总数：', '').trim();
+          } else if (line.includes('累计转发：')) {
+            repostCount = line.split('累计转发：')[1].trim();
+          } else if (line.includes('累计评论：')) {
+            commentCount = line.split('累计评论：')[1].trim();
+          } else if (line.includes('累计点赞：')) {
+            likeCount = line.split('累计点赞：')[1].trim();
+          } else if (line.startsWith('好友与互动：')) {
+            friendInfo = line.replace('好友与互动：', '').trim();
+          }
+        } else if (currentSection === '【个人简介】') {
+          description = description ? `${description}\n${line}` : line;
+        } else if (currentSection === '【主页链接】') {
+          if (line.startsWith('微博主页：')) pageUrl = line.replace('微博主页：', '').trim();
+          else if (line.startsWith('博客/网址：')) blogUrl = line.replace('博客/网址：', '').trim();
+        } else if (currentSection === '【荣誉与标签】') {
+          if (line.startsWith('- ')) tags.push(line.replace(/^- /, '').trim());
+        }
+
+        if (line.startsWith('资料归档时间：')) {
+          updatedAt = line.replace('资料归档时间：', '').trim();
+        }
+      }
+
+      if (!screenName) {
+        const dirName = path.basename(path.dirname(txtPath));
+        if (dirName && dirName !== uid && !dirName.startsWith('user_')) {
+          screenName = dirName;
+        }
+      }
+
+      const userDir = path.dirname(txtPath);
+      const avatarLocalFull = path.join(userDir, 'profile', 'avatar.jpg');
+      const coverWebLocalFull = path.join(userDir, 'profile', 'cover_web.jpg');
+      const coverPhoneLocalFull = path.join(userDir, 'profile', 'cover_phone.jpg');
+
+      return {
+        uid,
+        screenName: screenName || `user_${uid}`,
+        gender,
+        birthday,
+        constellation,
+        location,
+        ipLocation,
+        education,
+        career,
+        sunshineCredit,
+        createdAt,
+        verified,
+        verifiedReason,
+        verifiedType,
+        realAuth,
+        description,
+        followersCount,
+        followersCountStr,
+        friendsCount,
+        statusesCount,
+        repostCount,
+        commentCount,
+        likeCount,
+        totalInteractions,
+        vipInfo,
+        tags,
+        friendInfo,
+        pageUrl,
+        blogUrl,
+        media: {
+          avatarUrl: '',
+          avatarLocalPath: fs.existsSync(avatarLocalFull) ? 'profile/avatar.jpg' : '',
+          coverPhoneUrl: '',
+          coverPhoneLocalPath: fs.existsSync(coverPhoneLocalFull) ? 'profile/cover_phone.jpg' : (fs.existsSync(coverWebLocalFull) ? '同网页端背景' : ''),
+          coverWebLocalPath: fs.existsSync(coverWebLocalFull) ? 'profile/cover_web.jpg' : undefined
+        },
+        updatedAt
+      };
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -278,6 +453,13 @@ export class BloggerProfileManager {
    */
   private async downloadMediaFile(url: string, targetPath: string, maxRetries: number = 3): Promise<boolean> {
     if (!url) return false;
+    let targetUrl = url.trim();
+    if (targetUrl.startsWith('//')) {
+      targetUrl = 'https:' + targetUrl;
+    } else if (targetUrl.startsWith('http://')) {
+      targetUrl = targetUrl.replace(/^http:\/\//, 'https://');
+    }
+
     const dir = path.dirname(targetPath);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
@@ -292,7 +474,7 @@ export class BloggerProfileManager {
       const tempPath = `${targetPath}.tmp.${Date.now()}`;
       try {
         const response = await axios({
-          url,
+          url: targetUrl,
           method: 'GET',
           responseType: 'arraybuffer',
           headers: {
@@ -313,10 +495,10 @@ export class BloggerProfileManager {
           try { fs.unlinkSync(tempPath); } catch {}
         }
         if (attempt < maxRetries) {
-          logger.warn(`下载博主资料媒体重试 (${attempt}/${maxRetries}) (${url}): ${err.message}`);
+          logger.warn(`下载博主资料媒体重试 (${attempt}/${maxRetries}) (${targetUrl}): ${err.message}`);
           await new Promise(r => setTimeout(r, 1000 * attempt));
         } else {
-          logger.warn(`下载博主资料媒体失败 (${url}): ${err.message}`);
+          logger.warn(`下载博主资料媒体失败 (${targetUrl}): ${err.message}`);
         }
       }
     }
@@ -338,9 +520,9 @@ export class BloggerProfileManager {
   ): Promise<BloggerProfileData | null> {
     if (!uid) return null;
 
-    // 1. 进程内缓存：如果本次程序运行中已处理过该 UID，直接跳过
-    if (!options?.force && this.syncedUids.has(uid)) {
-      return null;
+    // 1. 进程内缓存：如果本次程序运行中已缓存过该 UID 的资料，直接返回
+    if (!options?.force && this.profileCache.has(uid)) {
+      return this.profileCache.get(uid)!;
     }
 
     // 2. 检查本地磁盘是否已存在该博主的资料文件（例如: 用户ID.txt）
@@ -361,9 +543,13 @@ export class BloggerProfileManager {
       const sanitized = screenName.replace(/[\\/:*?"<>|]/g, '_').trim();
       const txtPath = path.join(config.OUTPUT_DIR, sanitized, `${uid}.txt`);
       if (fs.existsSync(txtPath) && fs.statSync(txtPath).size > 0) {
-        logger.debug(`博主 (${screenName}) 资料文件已存在 (${txtPath})，跳过重复下载与保存。`);
-        this.syncedUids.add(uid);
-        return null;
+        const existingData = this.parseProfileFromTxt(txtPath, uid);
+        if (existingData) {
+          logger.debug(`博主 (${existingData.screenName}) 资料文件已存在 (${txtPath})，跳过重复下载与保存。`);
+          this.syncedUids.add(uid);
+          this.profileCache.set(uid, existingData);
+          return existingData;
+        }
       }
     }
 
@@ -375,9 +561,13 @@ export class BloggerProfileManager {
           if (entry.isDirectory()) {
             const candidateTxt = path.join(config.OUTPUT_DIR, entry.name, `${uid}.txt`);
             if (fs.existsSync(candidateTxt) && fs.statSync(candidateTxt).size > 0) {
-              logger.debug(`博主资料文件已存在 (${candidateTxt})，跳过重复下载与保存。`);
-              this.syncedUids.add(uid);
-              return null;
+              const existingData = this.parseProfileFromTxt(candidateTxt, uid);
+              if (existingData) {
+                logger.debug(`博主 (${existingData.screenName}) 资料文件已存在 (${candidateTxt})，跳过重复下载与保存。`);
+                this.syncedUids.add(uid);
+                this.profileCache.set(uid, existingData);
+                return existingData;
+              }
             }
           }
         }
@@ -554,7 +744,9 @@ export class BloggerProfileManager {
     // 7. 保存为单独的纯文本资料文件（例如: OUTPUT_DIR/博主昵称/<用户ID>.txt）
     const textContent = this.generatePlainText(profileData);
     const txtPath = path.join(userDir, `${uid}.txt`);
-    fs.writeFileSync(txtPath, textContent, 'utf8');
+    const tempTxt = `${txtPath}.tmp.${Date.now()}`;
+    fs.writeFileSync(tempTxt, textContent, 'utf8');
+    fs.renameSync(tempTxt, txtPath);
 
     // 8. 若启用了数据库，同步保存至 user_profiles 数据表
     if (config.DB_TYPE) {
@@ -568,6 +760,7 @@ export class BloggerProfileManager {
     }
 
     this.syncedUids.add(uid);
+    this.profileCache.set(uid, profileData);
     logger.info(`✅ 博主资料已成功归档至单个文件: ${txtPath}`);
     return profileData;
   }

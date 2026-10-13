@@ -441,7 +441,8 @@ export class TelegramBot {
         msg += `• <b>粉丝数量</b>: ${profile.followersCountStr} (${profile.followersCount.toLocaleString()} 人)\n`;
         msg += `• <b>互动数据</b>: 转评赞总计 ${profile.totalInteractions} (评 ${profile.commentCount} | 转 ${profile.repostCount} | 赞 ${profile.likeCount})\n`;
         msg += `• <b>微博总量</b>: ${profile.statusesCount} 条\n\n`;
-        msg += `📁 <b>资料归档路径</b>: <code>${config.OUTPUT_DIR}/${profile.screenName}/${profile.uid}.txt</code>`;
+        const relPath = path.join(config.OUTPUT_DIR, profile.screenName, `${profile.uid}.txt`).replace(/\\/g, '/');
+        msg += `📁 <b>资料归档路径</b>: <code>${relPath}</code>`;
         await Notifier.sendText(msg);
       } else {
         await Notifier.sendText(`❌ 获取博主 (${uid}) 资料失败。`);
