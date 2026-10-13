@@ -40,8 +40,15 @@ export function writeEnv(key: string, value: string): void {
   try {
     // 防御 CRLF 注入：去除换行符，防止多行注入恶意环境变量
     const cleanKey = key.replace(/[\r\n]/g, '').trim();
-    const cleanValue = value.replace(/[\r\n]/g, '').trim();
+    let cleanValue = value.replace(/[\r\n]/g, '').trim();
     if (!cleanKey) return;
+
+    // 若传入的是成对空引号（如 "" 或 ''），规范化为空字符串
+    if ((cleanValue.startsWith('"') && cleanValue.endsWith('"')) || (cleanValue.startsWith("'") && cleanValue.endsWith("'"))) {
+      if (cleanValue.length === 2) {
+        cleanValue = '';
+      }
+    }
 
     let content = '';
     if (fs.existsSync(envFilePath)) {
@@ -49,47 +56,70 @@ export function writeEnv(key: string, value: string): void {
     }
     
     const lines = content.split(/\r?\n/);
-    let found = false;
-    
-    // We check for both short name and legacy WEIBO_ prefixed name
-    const matchesKey = (lineKey: string) => {
-      return lineKey === cleanKey || lineKey === `WEIBO_${cleanKey}`;
+    const normKey = (k: string) => k.replace(/^WEIBO_/i, '').toUpperCase();
+    const targetNorm = normKey(cleanKey);
+
+    const isMatch = (lineKey: string) => {
+      return normKey(lineKey) === targetNorm;
     };
-    
-    const updatedLines = lines.map(line => {
+
+    const activeIndices: { index: number; key: string }[] = [];
+    const commentIndices: { index: number; key: string; isPlaceholder: boolean }[] = [];
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
       const trimmed = line.trim();
-      
-      // If line is commented out but matches key, uncomment it and update the value
+
       if (trimmed.startsWith('#')) {
         const match = trimmed.match(/^#\s*([A-Za-z0-9_]+)\s*=(.*)$/);
-        if (match && matchesKey(match[1].trim())) {
-          found = true;
-          return `${match[1].trim()}=${value}`;
+        if (match && isMatch(match[1].trim())) {
+          const commentKey = match[1].trim();
+          const rawVal = match[2].trim();
+          commentIndices.push({
+            index: i,
+            key: commentKey,
+            // 区分注释占位符（如 "# POST_SCRIPT_COMMAND="）与缩进说明示例（如 "#   POST_SCRIPT_COMMAND=..."）
+            isPlaceholder: rawVal === '' || !line.startsWith('#   ')
+          });
         }
-        return line;
+      } else {
+        const parts = trimmed.split('=');
+        if (parts.length >= 2 && isMatch(parts[0].trim())) {
+          activeIndices.push({ index: i, key: parts[0].trim() });
+        }
       }
-      
-      const parts = trimmed.split('=');
-      if (parts.length >= 2 && matchesKey(parts[0].trim())) {
-        found = true;
-        // Keep the exact key name used in the file
-        return `${parts[0].trim()}=${value}`;
+    }
+
+    const updatedLines = [...lines];
+
+    if (activeIndices.length > 0) {
+      // 场景 1：已存在生效配置项。更新首个活跃配置，并自动剔除后续的历史重复定义（自愈去重）
+      const firstActive = activeIndices[0];
+      updatedLines[firstActive.index] = `${firstActive.key}=${cleanValue}`;
+      for (let j = activeIndices.length - 1; j >= 1; j--) {
+        updatedLines.splice(activeIndices[j].index, 1);
       }
-      return line;
-    });
-    
-    if (!found) {
-      updatedLines.push(`${key}=${value}`);
+    } else if (commentIndices.length > 0) {
+      // 场景 2：尚无生效配置项，但存在注释占位符。优先解注释真正的占位符行，绝不破坏文档中的示例注释
+      const targetComment = commentIndices.find(c => c.isPlaceholder) || commentIndices[commentIndices.length - 1];
+      updatedLines[targetComment.index] = `${targetComment.key}=${cleanValue}`;
+    } else {
+      // 场景 3：全新配置项。追加到文件末尾（若末尾已有空行则在空行前插入）
+      if (updatedLines.length > 0 && updatedLines[updatedLines.length - 1].trim() === '') {
+        updatedLines.splice(updatedLines.length - 1, 0, `${cleanKey}=${cleanValue}`);
+      } else {
+        updatedLines.push(`${cleanKey}=${cleanValue}`);
+      }
     }
     
     fs.writeFileSync(envFilePath, updatedLines.join('\n'), 'utf8');
     
     // Also hot-reload into process.env and in-memory config
-    process.env[key] = value;
-    process.env[`WEIBO_${key}`] = value; // keep legacy in-sync
-    updateConfigInMemory(key, value);
+    process.env[cleanKey] = cleanValue;
+    process.env[`WEIBO_${cleanKey}`] = cleanValue; // keep legacy in-sync
+    updateConfigInMemory(cleanKey, cleanValue);
     
-    logger.info(`Updated .env variable ${key} to ${value} and hot-reloaded.`);
+    logger.info(`Updated .env variable ${cleanKey} to ${cleanValue} and hot-reloaded.`);
   } catch (err) {
     logger.error(`Failed to write env variable ${key}`, err);
   }
@@ -113,6 +143,21 @@ function updateConfigInMemory(key: string, value: string): void {
     const num = parseInt(val, 10);
     return isNaN(num) ? 0 : num;
   };
+
+  const parseDuration = (val: string, defaultMs: number): number => {
+    if (!val) return defaultMs;
+    const match = val.trim().match(/^(\d+(?:\.\d+)?)\s*(h|m|s|ms)?$/i);
+    if (match) {
+      const num = parseFloat(match[1]);
+      const unit = (match[2] || 'ms').toLowerCase();
+      if (unit === 'h') return Math.floor(num * 3600 * 1000);
+      if (unit === 'm') return Math.floor(num * 60 * 1000);
+      if (unit === 's') return Math.floor(num * 1000);
+      if (unit === 'ms') return Math.floor(num);
+    }
+    const parsed = parseInt(val, 10);
+    return isNaN(parsed) || parsed <= 0 ? defaultMs : parsed;
+  };
   
   const conf = config as any;
   
@@ -124,8 +169,21 @@ function updateConfigInMemory(key: string, value: string): void {
     case 'LOGIN_MODE': conf.LOGIN_MODE = value; break;
     case 'HEADLESS': conf.HEADLESS = parseBool(value); break;
     case 'STATE_FILE': conf.STATE_FILE = value; break;
-    case 'WEIBO_SESSION_REFRESH_ENABLED': conf.WEIBO_SESSION_REFRESH_ENABLED = parseBool(value); break;
-    case 'WEIBO_SESSION_REFRESH_INTERVAL': conf.WEIBO_SESSION_REFRESH_INTERVAL = parseNum(value); break;
+    case 'WEIBO_SESSION_REFRESH_ENABLED':
+    case 'SESSION_REFRESH_ENABLED':
+      conf.WEIBO_SESSION_REFRESH_ENABLED = parseBool(value);
+      break;
+    case 'WEIBO_SESSION_REFRESH_INTERVAL':
+    case 'SESSION_REFRESH_INTERVAL':
+      conf.WEIBO_SESSION_REFRESH_INTERVAL = parseDuration(value, 12 * 60 * 60 * 1000);
+      break;
+    case 'WEIBO_SAVESTATE':
+    case 'SAVESTATE':
+      conf.WEIBO_SAVESTATE = parseNum(value) || 30;
+      break;
+    case 'LOGIN_QR_TIMEOUT':
+      conf.LOGIN_QR_TIMEOUT = parseDuration(value, 5 * 60 * 1000);
+      break;
     
     case 'TELEGRAM_BOT_TOKEN': conf.TELEGRAM_BOT_TOKEN = value || undefined; break;
     case 'TELEGRAM_CHAT_ID': conf.TELEGRAM_CHAT_ID = value || undefined; break;
@@ -184,21 +242,9 @@ function updateConfigInMemory(key: string, value: string): void {
     case 'POST_SCRIPT_COMMAND': conf.POST_SCRIPT_COMMAND = value || undefined; break;
     case 'POST_SCRIPT_TRIGGER': conf.POST_SCRIPT_TRIGGER = value || 'has_new_data'; break;
     case 'POST_SCRIPT_WAIT': conf.POST_SCRIPT_WAIT = parseBool(value); break;
-    case 'POST_SCRIPT_TIMEOUT': {
-      const match = value.match(/^(\d+(?:\.\d+)?)\s*(ms|s|m|h)?$/i);
-      if (match) {
-        const val = parseFloat(match[1]);
-        const unit = (match[2] || 'm').toLowerCase();
-        if (unit === 'h') conf.POST_SCRIPT_TIMEOUT = Math.floor(val * 3600 * 1000);
-        else if (unit === 'm') conf.POST_SCRIPT_TIMEOUT = Math.floor(val * 60 * 1000);
-        else if (unit === 's') conf.POST_SCRIPT_TIMEOUT = Math.floor(val * 1000);
-        else if (unit === 'ms') conf.POST_SCRIPT_TIMEOUT = Math.floor(val);
-      } else {
-        const num = parseNum(value);
-        conf.POST_SCRIPT_TIMEOUT = num > 0 ? num : 10 * 60 * 1000;
-      }
+    case 'POST_SCRIPT_TIMEOUT':
+      conf.POST_SCRIPT_TIMEOUT = parseDuration(value, 10 * 60 * 1000);
       break;
-    }
     case 'POST_SCRIPT_INHERIT_PROXY': conf.POST_SCRIPT_INHERIT_PROXY = parseBool(value); break;
   }
 }

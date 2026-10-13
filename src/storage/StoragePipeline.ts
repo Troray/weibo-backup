@@ -65,6 +65,7 @@ export class StoragePipeline {
     try {
       const localMedia = await this.downloader.downloadPostMedia(
         post.id,
+        post.time,
         post.cdn_images,
         post.cdn_videos,
         post.cdn_livephotos,

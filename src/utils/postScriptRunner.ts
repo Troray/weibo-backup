@@ -144,6 +144,122 @@ function resolveScriptCommand(rawCmd: string): string {
 }
 
 /**
+ * 格式化 rclone 耗时时间戳（如 11m51.2s -> 11分51秒）
+ */
+function formatRcloneDuration(raw: string): string {
+  const hMatch = raw.match(/(\d+)h/i);
+  const mMatch = raw.match(/(\d+)m/i);
+  const sMatch = raw.match(/([0-9.]+)s/i);
+  const msMatch = raw.match(/([0-9.]+)ms/i);
+
+  const parts: string[] = [];
+  if (hMatch) parts.push(`${hMatch[1]}小时`);
+  if (mMatch) parts.push(`${mMatch[1]}分`);
+  if (sMatch) parts.push(`${Math.round(parseFloat(sMatch[1]))}秒`);
+  else if (msMatch) parts.push(`${Math.round(parseFloat(msMatch[1]))}毫秒`);
+
+  return parts.length > 0 ? parts.join('') : raw;
+}
+
+/**
+ * 从 rclone 命令行中提取远程目标路径 (Remote Destination)
+ */
+function extractRcloneTarget(cmd: string): string | null {
+  if (!cmd || !/\brclone\b/i.test(cmd)) return null;
+  const match = cmd.match(/\brclone\s+(?:copy|sync|move|copyto|moveto)\s+(.+)$/i);
+  if (!match) return null;
+  const rest = match[1];
+  const tokens: string[] = [];
+  const regex = /"([^"]+)"|'([^']+)'|(\S+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = regex.exec(rest)) !== null) {
+    const token = m[1] || m[2] || m[3];
+    if (!token.startsWith('-')) {
+      tokens.push(token);
+    }
+  }
+  if (tokens.length >= 2) {
+    return tokens[1];
+  }
+  return null;
+}
+
+/**
+ * 智能解析 rclone 输出统计信息并转换为友好中文摘要
+ */
+function parseRcloneOutput(output: string): string | null {
+  if (!output) return null;
+
+  const hasTransferred = /Transferred:\s+/i.test(output);
+  const hasElapsed = /Elapsed time:\s+/i.test(output);
+  const hasChecks = /Checks:\s+/i.test(output);
+
+  if (!hasTransferred && !hasElapsed && !hasChecks) {
+    return null;
+  }
+
+  // 1. 提取文件传输数量与进度: Transferred: 751 / 751, 100%
+  const filesMatch = output.match(/Transferred:\s+(\d+)\s*\/\s*(\d+)(?:,\s*([0-9]+%|-))?/i);
+  // 2. 提取数据体积: Transferred: 1.234 GiB / 1.234 GiB, 100%, 2.500 MiB/s
+  const sizeMatch = output.match(/Transferred:\s+([0-9.]+\s*[KMGTPE]?i?B)\s*\/\s*([0-9.]+\s*[KMGTPE]?i?B)(?:,\s*([0-9]+%))?/i);
+  // 3. 提取校验/索引清单: Checks: 0 / 0, -, Listed 782
+  const checksMatch = output.match(/Checks:\s+(\d+)\s*\/\s*(\d+)(?:,\s*([0-9]+%|-))?(?:,\s*Listed\s*(\d+))?/i);
+  // 4. 提取耗时: Elapsed time: 11m51.2s
+  const elapsedMatch = output.match(/Elapsed time:\s*([0-9a-z.]+)/i);
+  // 5. 提取错误与删除数
+  const errorsMatch = output.match(/Errors:\s*(\d+)/i);
+  const deletedMatch = output.match(/Deleted:\s*(\d+)/i);
+
+  const parts: string[] = [];
+
+  const errors = errorsMatch ? parseInt(errorsMatch[1], 10) : 0;
+  if (errors > 0) {
+    parts.push(`含 ${errors} 个传输错误`);
+  }
+
+  if (filesMatch) {
+    const curFiles = filesMatch[1];
+    const totalFiles = filesMatch[2];
+    const percent = filesMatch[3] && filesMatch[3] !== '-' ? filesMatch[3] : '';
+
+    if (totalFiles === '0') {
+      parts.push('无需同步新文件 (0/0)');
+    } else {
+      let fileStr = `已传输 ${curFiles} / ${totalFiles} 个文件`;
+      if (sizeMatch && sizeMatch[2]) {
+        fileStr += ` (共 ${sizeMatch[2]}${percent ? ', ' + percent : ''})`;
+      } else if (percent) {
+        fileStr += ` (${percent})`;
+      }
+      parts.push(fileStr);
+    }
+  } else if (sizeMatch) {
+    parts.push(`已传输 ${sizeMatch[1]} / ${sizeMatch[2]}${sizeMatch[3] ? ' (' + sizeMatch[3] + ')' : ''}`);
+  }
+
+  if (checksMatch) {
+    const checked = checksMatch[1];
+    const totalChecks = checksMatch[2];
+    const listed = checksMatch[4];
+    if (listed && listed !== '0') {
+      parts.push(`索引清单: ${listed} 项`);
+    } else if (totalChecks !== '0') {
+      parts.push(`校验文件: ${checked} / ${totalChecks}`);
+    }
+  }
+
+  if (deletedMatch && parseInt(deletedMatch[1], 10) > 0) {
+    parts.push(`删除文件: ${deletedMatch[1]} 项`);
+  }
+
+  if (elapsedMatch) {
+    parts.push(`耗时: ${formatRcloneDuration(elapsedMatch[1])}`);
+  }
+
+  return parts.length > 0 ? parts.join(' | ') : null;
+}
+
+/**
  * 检查当前任务上下文是否满足后置脚本的触发策略
  */
 export function shouldExecuteHook(context: HookContext): { shouldRun: boolean; reason?: string } {
@@ -418,10 +534,36 @@ export async function executePostScript(context: HookContext): Promise<HookExecu
           return;
         }
 
-        // 3. 兜底策略：提取 stdout/stderr 尾部有效行（截断至安全长度防 Telegram 4096 溢出）
+        // 2.5. 智能识别并美化 rclone 统计数据 (友好中文摘要与目标路径解析)
+        const rcloneSummary = parseRcloneOutput(rawOutput);
+        if (rcloneSummary) {
+          const rcloneTarget = extractRcloneTarget(fullCommand);
+          const hasRcloneErrors = /Errors:\s*[1-9]\d*/i.test(rawOutput);
+          const isSuccess = code === 0 && !hasRcloneErrors;
+
+          let rcloneErr: string | undefined = undefined;
+          if (!isSuccess) {
+            const errMatch = rawOutput.match(/ERROR\s*:\s*([^\r\n]+)/i);
+            rcloneErr = errMatch ? errMatch[1].trim() : (stderrStr.slice(0, 200) || undefined);
+          }
+
+          resolve({
+            executed: true,
+            success: isSuccess,
+            durationMs,
+            exitCode: code,
+            summary: rcloneSummary,
+            detail: rcloneTarget || undefined,
+            error: rcloneErr,
+            rawOutput
+          });
+          return;
+        }
+
+        // 3. 兜底策略：提取 stdout/stderr 尾部有效行（压缩大段冗余空格并截断至安全长度防 Telegram 4096 溢出）
         const lines = (stdoutStr || stderrStr)
           .split(/\r?\n/)
-          .map(l => l.trim())
+          .map(l => l.trim().replace(/\s{2,}/g, ' '))
           .filter(Boolean);
         
         let fallbackSummary = '';
