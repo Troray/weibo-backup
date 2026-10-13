@@ -151,7 +151,7 @@ export class TelegramBot {
       } else if (command === '/user' || command === '/userid') {
         await this.handleUserCommand(parts);
       } else if (command === '/env') {
-        await this.handleEnvCommand(parts);
+        await this.handleEnvCommand(parts, text);
       } else {
         await Notifier.sendText(`❓ 未知指令: ${command}。输入 /help 查看所有可用指令。`);
       }
@@ -414,7 +414,7 @@ export class TelegramBot {
     }
   }
 
-  private static async handleEnvCommand(parts: string[]): Promise<void> {
+  private static async handleEnvCommand(parts: string[], rawText?: string): Promise<void> {
     const sub = parts[1]?.toLowerCase();
     if (!sub || sub === 'list') {
       const env = readEnv();
@@ -451,15 +451,28 @@ export class TelegramBot {
       }
     } else if (sub === 'set') {
       const key = parts[2]?.toUpperCase();
-      const value = parts.slice(3).join(' ');
-      if (!key || value === undefined) {
-        await Notifier.sendText("⚠️ 格式错误。正确格式：/env set <键名> <配置值>");
+      if (!key || parts.length < 4) {
+        await Notifier.sendText("⚠️ 格式错误。正确格式：/env set <键名> <配置值>\n💡 提示：若需清空变量值，可将配置值传入 `\"\"` 或 `clear`。");
       } else {
+        // 优先从原始输入文本中完整截取配置值，保证空格、特殊符号与长参数原样保留
+        let value = '';
+        if (rawText) {
+          const match = rawText.match(/^\/env\s+set\s+[^\s]+\s+([\s\S]*)$/i);
+          value = match ? match[1].trim() : parts.slice(3).join(' ');
+        } else {
+          value = parts.slice(3).join(' ');
+        }
+
+        // 统一清空指令识别
+        if (value.toLowerCase() === 'clear' || value.toLowerCase() === 'none' || value === '""' || value === "''") {
+          value = '';
+        }
+
         writeEnv(key, value);
         const isSensitive = /token|chat_id|secret|password|uri/i.test(key);
         const displayVal = isSensitive ? "******" : value;
         if (displayVal === '') {
-          await Notifier.sendText(`✅ 已成功修改并重新加载配置：\`${key}\` = \`""\``, 'Markdown');
+          await Notifier.sendText(`✅ 已成功清空并重新加载配置：\`${key}\` = \`""\``, 'Markdown');
         } else {
           await Notifier.sendText(`✅ 已成功修改并重新加载配置：\`${key}\` = \`${displayVal}\``, 'Markdown');
         }
