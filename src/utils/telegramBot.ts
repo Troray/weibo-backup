@@ -165,6 +165,7 @@ export class TelegramBot {
   }
 
   private static async showHelp(): Promise<void> {
+    const currentFileName = path.basename(getUserFilePath());
     const helpMsg = `🤖 微博爬虫机器人指令手册 🤖
 
 你可以通过发送以下指令与微博爬虫交互：
@@ -179,9 +180,9 @@ export class TelegramBot {
 定向操作（绕过日期和游标限制）：
 • \`/c\` <链接/BID/MID> 或 <日期> [UID] - 定向爬取单条微博或指定日期的数据。
 • \`/d\` <链接/BID/MID> 或 <日期> [UID] - 定向物理删除单条微博或指定日期的备份数据（包括媒体文件、数据库记录、Markdown、CSV）。
-  （注意：如果 userid.txt 中只配置启用了一个博主，[UID] 参数可以省略）。
+  （注意：如果 ${currentFileName} 中只配置启用了一个博主，[UID] 参数可以省略）。
 
-博主列表（userid.txt）管理：
+博主列表（${currentFileName}）管理：
 • /user list - 列出所有目标博主和增量游标。
 • \`/user add\` <UID> <名称> - 在列表中新增博主 UID 及昵称。
 • \`/user del\` <UID> - 从列表中删除指定博主。
@@ -382,7 +383,7 @@ export class TelegramBot {
       }
     } else if (sub === 'date' || sub === 'setdate' || sub === 'cursor') {
       const uid = parts[2];
-      const dateStr = parts[3];
+      const dateStr = parts.slice(3).join(' ');
       if (!uid || !dateStr) {
         await Notifier.sendText("⚠️ 格式错误。正确格式：/user date <UID> <YYYY-MM-DD[THH:mm:ss]>");
       } else {
@@ -396,7 +397,7 @@ export class TelegramBot {
       }
     } else if (sub === 'enddate' || sub === 'setenddate') {
       const uid = parts[2];
-      const dateStr = parts[3];
+      const dateStr = parts.slice(3).join(' ');
       if (!uid || !dateStr) {
         await Notifier.sendText("⚠️ 格式错误。正确格式：/user enddate <UID> <YYYY-MM-DD|clear>");
       } else {
