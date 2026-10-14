@@ -201,7 +201,7 @@ export const config: ScraperConfig = {
   })(),
   DB_URI: getEnvStr('DB_URI') || path.join(process.cwd(), 'weibo.sqlite'),
   DB_SSL_CA: getEnvStr('DB_SSL_CA') || undefined,
-  DB_SSL_REJECT_UNAUTHORIZED: getEnvBool('DB_SSL_REJECT_UNAUTHORIZED', true),
+  DB_SSL_REJECT_UNAUTHORIZED: getEnvBool('DB_SSL_REJECT_UNAUTHORIZED', false),
   
   POST_SCRIPT_COMMAND: getEnvStr('POST_SCRIPT_COMMAND') || undefined,
   POST_SCRIPT_TRIGGER: (() => {

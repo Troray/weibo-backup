@@ -66,6 +66,79 @@ function resolveMysqlConnection(): string | Knex.MySqlConnectionConfig {
   return sanitizedUri;
 }
 
+/**
+ * 规范化并清洗 PostgreSQL 连接配置：
+ * 1. 兼容云服务商（如 Aiven, Supabase, Neon）连接串中自带的 sslmode / ssl-mode 参数；
+ * 2. 剥离 query 中的 sslmode，避免 pg 驱动内部覆盖 rejectUnauthorized 选项并引发 self-signed certificate in certificate chain 错误；
+ * 3. 支持 DB_SSL_REJECT_UNAUTHORIZED（默认为 false 兼容云端自签名证书）；
+ * 4. 支持 DB_SSL_CA 自定义证书加载。
+ */
+function resolvePostgresConnection(): string | Knex.PgConnectionConfig {
+  const rawUri = config.DB_URI;
+  let sanitizedUri = rawUri;
+  let hasSslParam = false;
+
+  try {
+    const parsed = new URL(rawUri);
+    if (parsed.searchParams.has('sslmode')) {
+      parsed.searchParams.delete('sslmode');
+      hasSslParam = true;
+    }
+    if (parsed.searchParams.has('ssl-mode')) {
+      parsed.searchParams.delete('ssl-mode');
+      hasSslParam = true;
+    }
+    sanitizedUri = parsed.toString();
+  } catch {
+    const cleaned = rawUri
+      .replace(/[?&]sslmode=[^&]*/gi, '')
+      .replace(/[?&]ssl-mode=[^&]*/gi, '')
+      .replace(/\?&/, '?')
+      .replace(/\?$/, '');
+    if (cleaned !== rawUri) {
+      sanitizedUri = cleaned;
+      hasSslParam = true;
+    }
+  }
+
+  // 构建 SSL 配置
+  let sslConfig: any = false;
+
+  if (config.DB_SSL_CA) {
+    const caPath = path.isAbsolute(config.DB_SSL_CA)
+      ? config.DB_SSL_CA
+      : path.resolve(process.cwd(), config.DB_SSL_CA);
+    if (fs.existsSync(caPath)) {
+      logger.info(`已加载自定义 PostgreSQL SSL CA 证书: ${caPath}`);
+      sslConfig = {
+        ca: fs.readFileSync(caPath),
+        rejectUnauthorized: config.DB_SSL_REJECT_UNAUTHORIZED,
+      };
+    } else {
+      logger.warn(`指定的 DB_SSL_CA 证书文件不存在: ${caPath}，将使用基础 SSL 设置。`);
+      sslConfig = {
+        rejectUnauthorized: config.DB_SSL_REJECT_UNAUTHORIZED,
+      };
+    }
+  } else if (hasSslParam || rawUri.includes('sslmode') || rawUri.includes('ssl-mode')) {
+    sslConfig = {
+      rejectUnauthorized: config.DB_SSL_REJECT_UNAUTHORIZED,
+    };
+  }
+
+  if (sslConfig !== false) {
+    if (hasSslParam) {
+      logger.info(`已自动规范化 PostgreSQL 连接参数并配置安全连接 (rejectUnauthorized=${config.DB_SSL_REJECT_UNAUTHORIZED})。`);
+    }
+    return {
+      connectionString: sanitizedUri,
+      ssl: sslConfig,
+    } as any;
+  }
+
+  return sanitizedUri;
+}
+
 export function getDb(): Knex {
   if (dbInstance) return dbInstance;
 
@@ -99,7 +172,7 @@ export function getDb(): Knex {
   } else if (config.DB_TYPE === 'postgres') {
     dbConfig = {
       client: 'pg',
-      connection: config.DB_URI,
+      connection: resolvePostgresConnection() as any,
     };
     logger.info(`Database connection initialized for PostgreSQL.`);
   } else {
