@@ -51,14 +51,19 @@ export function parseCursorToTimestamp(str: string): number {
     return trimmed.length === 10 ? num * 1000 : num;
   }
   const normalized = trimmed.replace(/\//g, '-');
-  if (/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
-    const ts = Date.parse(`${normalized}T00:00:00+08:00`);
+  const dateOnlyMatch = normalized.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (dateOnlyMatch) {
+    const [, y, m, d] = dateOnlyMatch;
+    const padded = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+    const ts = Date.parse(`${padded}T00:00:00+08:00`);
     if (!isNaN(ts)) return ts;
   }
-  if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$/.test(normalized)) {
-    const iso = normalized.replace(' ', 'T');
-    const fullIso = iso.split(':').length === 2 ? `${iso}:00` : iso;
-    const ts = Date.parse(`${fullIso}+08:00`);
+  const dateTimeMatch = normalized.match(/^(\d{4})-(\d{1,2})-(\d{1,2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (dateTimeMatch) {
+    const [, y, m, d, hh, mm, ss] = dateTimeMatch;
+    const paddedDate = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+    const paddedTime = `${hh.padStart(2, '0')}:${mm}:${ss ? ss.padStart(2, '0') : '00'}`;
+    const ts = Date.parse(`${paddedDate}T${paddedTime}+08:00`);
     if (!isNaN(ts)) return ts;
   }
   const fallback = Date.parse(trimmed);
@@ -140,10 +145,39 @@ export function formatCursorDateStr(val?: string): string {
 export function isDateOrTimestamp(val: string): boolean {
   const v = val.trim();
   if (!v) return false;
-  // Matches YYYY-MM-DD, YYYY-MM-DDTHH:mm:ss, YYYY/MM/DD, or unix timestamp (10-13 digits)
-  if (/^\d{4}[-/]\d{1,2}[-/]\d{1,2}/.test(v)) return true;
-  if (/^\d{10,13}$/.test(v)) return true;
+  if (isStrictDateString(v)) return true;
+  if (/^\d{10,13}$/.test(v)) {
+    const num = parseInt(v, 10);
+    const ts = v.length === 10 ? num * 1000 : num;
+    const year = new Date(ts).getFullYear();
+    return year >= 2000 && year <= 2100;
+  }
   return false;
+}
+
+export function isStrictDateString(val: string): boolean {
+  const v = val.trim();
+  if (!v) return false;
+  return /^\d{4}[-/]\d{1,2}[-/]\d{1,2}([ T]\d{1,2}:\d{2}(:\d{2})?(\.\d{1,3})?([+-]\d{2}:?\d{2}|Z)?)?$/i.test(v);
+}
+
+function combineDateTimeTokens(tokens: string[]): string[] {
+  const combined: string[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const curr = tokens[i];
+    const next = tokens[i + 1];
+    if (
+      /^\d{4}[-/]\d{1,2}[-/]\d{1,2}$/.test(curr) &&
+      next &&
+      /^\d{1,2}:\d{2}(:\d{2})?(\.\d{1,3})?([+-]\d{2}:?\d{2}|Z)?$/i.test(next)
+    ) {
+      combined.push(`${curr} ${next}`);
+      i++;
+    } else {
+      combined.push(curr);
+    }
+  }
+  return combined;
 }
 
 export function readUsers(): UserEntry[] {
@@ -162,16 +196,19 @@ export function readUsers(): UserEntry[] {
         entries.push({ rawLine: '' });
         continue;
       }
-      
-      const parts = trimmed.split('|');
-      if (parts.length >= 1) {
-        let firstPart = parts[0].trim();
-        let isCommented = false;
-        if (firstPart.startsWith('#')) {
-          isCommented = true;
-          firstPart = firstPart.slice(1).trim();
-        }
-        
+
+      let isCommented = false;
+      let workLine = trimmed;
+      if (workLine.startsWith('#')) {
+        isCommented = true;
+        workLine = workLine.slice(1).trim();
+      }
+
+      // Check if it's pipe-separated
+      if (workLine.includes('|')) {
+        const parts = workLine.split('|').map(p => p.trim());
+        const firstPart = parts[0];
+
         // A valid UID must be numeric
         if (/^\d+$/.test(firstPart)) {
           const uid = firstPart;
@@ -180,30 +217,105 @@ export function readUsers(): UserEntry[] {
           let endDate = '';
 
           if (parts.length === 2) {
-            const secondPart = parts[1]?.trim() || '';
-            if (isDateOrTimestamp(secondPart)) {
+            const secondPart = parts[1] || '';
+            if (isStrictDateString(secondPart) || isDateOrTimestamp(secondPart)) {
               cursor = secondPart;
             } else {
               name = secondPart;
             }
           } else if (parts.length === 3) {
-            const p1 = parts[1]?.trim() || '';
-            const p2 = parts[2]?.trim() || '';
-            if (isDateOrTimestamp(p1) && isDateOrTimestamp(p2)) {
+            const p1 = parts[1] || '';
+            const p2 = parts[2] || '';
+            if (isStrictDateString(p1) && isStrictDateString(p2)) {
               cursor = p1;
               endDate = p2;
-            } else if (isDateOrTimestamp(p1) && !p2) {
+            } else if (isStrictDateString(p1) && !p2) {
               cursor = p1;
             } else {
               name = p1;
               cursor = p2;
             }
           } else if (parts.length >= 4) {
-            name = parts[1]?.trim() || '';
-            cursor = parts[2]?.trim() || '';
-            const p3 = parts[3]?.trim() || '';
+            name = parts[1] || '';
+            cursor = parts[2] || '';
+            const p3 = parts[3] || '';
             if (isDateOrTimestamp(p3)) {
               endDate = p3;
+            }
+          }
+
+          entries.push({ uid, name, cursor, endDate, isCommented });
+          continue;
+        }
+      } else {
+        // Whitespace-separated (single space, multiple spaces, tabs)
+        const rawTokens = workLine.split(/\s+/).filter(Boolean);
+        if (rawTokens.length > 0 && /^\d+$/.test(rawTokens[0])) {
+          const uid = rawTokens[0];
+          const combined = combineDateTimeTokens(rawTokens.slice(1));
+          let name = '';
+          let cursor = '';
+          let endDate = '';
+
+          if (combined.length === 0) {
+            // Only UID, e.g.: 1234567890
+          } else if (combined.length === 1) {
+            // Either UID + cursor, or UID + nickname
+            if (isStrictDateString(combined[0]) || isDateOrTimestamp(combined[0])) {
+              cursor = combined[0];
+            } else {
+              name = combined[0];
+            }
+          } else if (combined.length === 2) {
+            const c0 = combined[0];
+            const c1 = combined[1];
+            if (isStrictDateString(c0) && isStrictDateString(c1)) {
+              // 1234567890 2025-01-01 2025-12-31
+              cursor = c0;
+              endDate = c1;
+            } else if (isStrictDateString(c1) || isDateOrTimestamp(c1)) {
+              // 1234567890 科技小侦探 2026-10-10 or 1234567890 888888 2026-10-10
+              name = c0;
+              cursor = c1;
+            } else {
+              // 1234567890 John Doe (name with spaces)
+              name = `${c0} ${c1}`;
+            }
+          } else if (combined.length === 3) {
+            const c0 = combined[0];
+            const c1 = combined[1];
+            const c2 = combined[2];
+            if (
+              (isStrictDateString(c1) || isDateOrTimestamp(c1)) &&
+              (isStrictDateString(c2) || isDateOrTimestamp(c2))
+            ) {
+              // 1234567890 科技小侦探 2025-01-01 2025-12-31
+              name = c0;
+              cursor = c1;
+              endDate = c2;
+            } else if (isStrictDateString(c2) || isDateOrTimestamp(c2)) {
+              // 1234567890 John Doe 2026-10-10
+              name = `${c0} ${c1}`;
+              cursor = c2;
+            } else {
+              name = combined.join(' ');
+            }
+          } else {
+            // combined.length >= 4
+            const last = combined[combined.length - 1];
+            const secondLast = combined[combined.length - 2];
+            if (
+              (isStrictDateString(secondLast) || isDateOrTimestamp(secondLast)) &&
+              (isStrictDateString(last) || isDateOrTimestamp(last))
+            ) {
+              name = combined.slice(0, -2).join(' ');
+              cursor = secondLast;
+              endDate = last;
+            } else if (isStrictDateString(last) || isDateOrTimestamp(last)) {
+              name = combined.slice(0, -1).join(' ');
+              cursor = last;
+            } else {
+              name = combined.join(' ');
             }
           }
 
