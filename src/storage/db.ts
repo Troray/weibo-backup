@@ -6,6 +6,66 @@ import { logger } from '../utils/logger';
 
 let dbInstance: Knex | null = null;
 
+/**
+ * 规范化并清洗 MySQL 连接配置：
+ * 1. 兼容云服务商（如 Aiven, TiDB, RDS）连接串中自带的 ssl-mode / sslmode 参数，防止触发 mysql2 驱动配置警告或未来抛错；
+ * 2. 如果配置了 DB_SSL_CA，则自动加载 CA 证书文件并注入安全 SSL 连接选项；
+ * 3. 保持与原生 MySQL2 连接配置的完全兼容。
+ */
+function resolveMysqlConnection(): string | Knex.MySqlConnectionConfig {
+  const rawUri = config.DB_URI;
+  let sanitizedUri = rawUri;
+  let removedSslMode = false;
+
+  try {
+    const parsed = new URL(rawUri);
+    if (parsed.searchParams.has('ssl-mode')) {
+      parsed.searchParams.delete('ssl-mode');
+      removedSslMode = true;
+    }
+    if (parsed.searchParams.has('sslmode')) {
+      parsed.searchParams.delete('sslmode');
+      removedSslMode = true;
+    }
+    sanitizedUri = parsed.toString();
+  } catch {
+    const cleaned = rawUri
+      .replace(/[?&]ssl-mode=[^&]*/gi, '')
+      .replace(/[?&]sslmode=[^&]*/gi, '')
+      .replace(/\?&/, '?')
+      .replace(/\?$/, '');
+    if (cleaned !== rawUri) {
+      sanitizedUri = cleaned;
+      removedSslMode = true;
+    }
+  }
+
+  if (removedSslMode) {
+    logger.info('已自动处理并剥离 MySQL 连接串中不被 mysql2 驱动直接支持的 ssl-mode 参数，避免触发驱动警告。');
+  }
+
+  // 检查是否配置了自定义 SSL CA 证书
+  if (config.DB_SSL_CA) {
+    const caPath = path.isAbsolute(config.DB_SSL_CA)
+      ? config.DB_SSL_CA
+      : path.resolve(process.cwd(), config.DB_SSL_CA);
+    if (fs.existsSync(caPath)) {
+      logger.info(`已加载自定义 MySQL SSL CA 证书: ${caPath}`);
+      return {
+        uri: sanitizedUri,
+        ssl: {
+          ca: fs.readFileSync(caPath),
+          rejectUnauthorized: config.DB_SSL_REJECT_UNAUTHORIZED,
+        },
+      } as any;
+    } else {
+      logger.warn(`指定的 DB_SSL_CA 证书文件不存在: ${caPath}，将使用连接串默认设置。`);
+    }
+  }
+
+  return sanitizedUri;
+}
+
 export function getDb(): Knex {
   if (dbInstance) return dbInstance;
 
@@ -33,7 +93,7 @@ export function getDb(): Knex {
   } else if (config.DB_TYPE === 'mysql') {
     dbConfig = {
       client: 'mysql2',
-      connection: config.DB_URI,
+      connection: resolveMysqlConnection() as any,
     };
     logger.info(`Database connection initialized for MySQL.`);
   } else if (config.DB_TYPE === 'postgres') {
