@@ -334,13 +334,13 @@ export class BloggerProfileManager {
           else if (line.startsWith('实名认证：')) realAuth = line.replace('实名认证：', '').trim();
           else if (line.startsWith('真实姓名：')) {
             const val = line.replace('真实姓名：', '').trim();
-            if (val && !val.includes('未公开') && !val.includes('受微博隐私限制') && !val.includes('未向未关注访客公开')) {
+            if (val && !val.includes('未公开') && !val.includes('未向') && !val.includes('限制')) {
               realName = val;
             }
           }
           else if (line.startsWith('职业认证：')) {
             const val = line.replace('职业认证：', '').trim();
-            if (val && !val.includes('未公开') && !val.includes('受微博隐私限制') && !val.includes('未向未关注访客公开')) {
+            if (val && !val.includes('未公开') && !val.includes('未向') && !val.includes('限制')) {
               realCareer = val;
             }
           }
@@ -895,12 +895,12 @@ export class BloggerProfileManager {
     if (data.realName) {
       text += `真实姓名：${data.realName}\n`;
     } else if (data.realAuth && data.realAuth.includes('已实名认证')) {
-      text += `真实姓名：未向未关注访客公开 (微博隐私限制：当前抓取账号未关注该博主，关注后重抓即可获取)\n`;
+      text += `真实姓名：未向当前账号展示 (微博风控限制：当前爬虫账号未实名或信用分一般，更换已实名主号即可查看)\n`;
     }
     if (data.realCareer) {
       text += `职业认证：${data.realCareer}\n`;
     } else if (data.realAuth && data.realAuth.includes('已实名认证')) {
-      text += `职业认证：未向未关注访客公开 (需账号关注该博主后可见)\n`;
+      text += `职业认证：未向当前账号展示 (需已实名合规账号可见)\n`;
     }
     text += `会员等级：${data.vipInfo || '普通用户'}\n\n`;
 
