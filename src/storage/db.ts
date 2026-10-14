@@ -266,21 +266,31 @@ export async function initializeSchema(db: Knex): Promise<void> {
       table.string('verified_type');
       table.string('verified_reason');
       table.string('real_auth');
+      table.string('real_name');
       table.integer('followers_count');
       table.integer('friends_count');
       table.integer('statuses_count');
       table.string('total_cnt');
       table.text('description');
-      table.string('avatar_url');
+      table.text('avatar_url');
       table.string('avatar_local');
-      table.string('cover_phone_url');
+      table.text('cover_phone_url');
       table.string('cover_phone_local');
-      table.string('cover_web_url');
+      table.text('cover_web_url');
       table.string('cover_web_local');
       table.text('raw_json');
       table.timestamps(true, true);
     });
     logger.info('Table "user_profiles" created.');
+  } else {
+    // Migration: check if real_name column exists in existing user_profiles table
+    const hasRealNameCol = await db.schema.hasColumn('user_profiles', 'real_name');
+    if (!hasRealNameCol) {
+      await db.schema.alterTable('user_profiles', (table) => {
+        table.string('real_name');
+      });
+      logger.info('Migrated table "user_profiles": added real_name column.');
+    }
   }
 }
 
@@ -375,6 +385,7 @@ export async function upsertUserProfile(db: Knex, profile: any): Promise<void> {
     verified_type: profile.verifiedType || '',
     verified_reason: profile.verifiedReason || '',
     real_auth: profile.realAuth || '',
+    real_name: profile.realName || '',
     followers_count: profile.followersCount || 0,
     friends_count: profile.friendsCount || 0,
     statuses_count: profile.statusesCount || 0,

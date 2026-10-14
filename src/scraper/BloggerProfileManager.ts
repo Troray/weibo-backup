@@ -15,6 +15,7 @@ export interface BloggerProfileMedia {
   coverPhoneLocalPath: string;
   coverWebUrl?: string;
   coverWebLocalPath?: string;
+  allPhoneCoverUrls?: string[];
 }
 
 export interface BloggerProfileData {
@@ -33,6 +34,8 @@ export interface BloggerProfileData {
   verifiedReason: string;
   verifiedType: string;
   realAuth: string;
+  realName?: string;
+  realCareer?: string;
   description: string;
   followersCount: number;
   followersCountStr: string;
@@ -139,9 +142,9 @@ export function parseEducation(edu: any): string {
 }
 
 /**
- * 解析职业/公司经历
+ * 解析职业/公司经历（支持普通 career/company 以及 real_name.career 实名职业）
  */
-export function parseCareer(career: any, company: any): string {
+export function parseCareer(career: any, company: any, realNameCareer?: string): string {
   const parts: string[] = [];
   if (typeof company === 'string' && company.trim()) {
     parts.push(company.trim());
@@ -165,6 +168,12 @@ export function parseCareer(career: any, company: any): string {
       const pos = career.position?.trim();
       const record = [comp, pos].filter(Boolean).join(' - ');
       if (record && !parts.includes(record)) parts.push(record);
+    }
+  }
+  if (realNameCareer && typeof realNameCareer === 'string') {
+    const cleaned = realNameCareer.replace(/^职业[：:]\s*/, '').trim();
+    if (cleaned && !parts.includes(cleaned)) {
+      parts.push(cleaned);
     }
   }
   return parts.join('；');
@@ -208,18 +217,29 @@ export function formatVipInfo(user: any): string {
 }
 
 /**
- * 格式化实名认证状态
+ * 格式化实名认证状态并提取真实姓名与实名职业
  */
-export function formatRealAuth(detail: any): string {
-  if (detail?.real_auth === true) {
-    if (detail.real_name?.name) {
-      return `已认证 (${detail.real_name.name})`;
+export function formatRealAuth(detail: any): { realAuth: string; realName: string; realCareer: string } {
+  let realName = '';
+  let realCareer = '';
+
+  if (detail?.real_name) {
+    if (typeof detail.real_name === 'object') {
+      realName = (detail.real_name.name || '').replace(/^(姓名|真实姓名)[：:]\s*/, '').trim();
+      realCareer = (detail.real_name.career || '').replace(/^职业[：:]\s*/, '').trim();
+    } else if (typeof detail.real_name === 'string') {
+      realName = detail.real_name.replace(/^(姓名|真实姓名)[：:]\s*/, '').trim();
     }
-    return '已认证';
-  } else if (detail?.real_auth === false) {
-    return '未认证';
   }
-  return '未公开';
+
+  let realAuth = '未公开';
+  if (detail?.real_auth === true) {
+    realAuth = realName ? `已实名认证 (${realName})` : '已实名认证';
+  } else if (detail?.real_auth === false) {
+    realAuth = '未认证';
+  }
+
+  return { realAuth, realName, realCareer };
 }
 
 export class BloggerProfileManager {
@@ -257,6 +277,8 @@ export class BloggerProfileManager {
       let verifiedReason = '';
       let verifiedType = '';
       let realAuth = '未公开';
+      let realName = '';
+      let realCareer = '';
       let vipInfo = '普通用户';
       let followersCountStr = '0';
       let followersCount = 0;
@@ -301,6 +323,8 @@ export class BloggerProfileManager {
             }
           }
           else if (line.startsWith('实名认证：')) realAuth = line.replace('实名认证：', '').trim();
+          else if (line.startsWith('真实姓名：')) realName = line.replace('真实姓名：', '').trim();
+          else if (line.startsWith('职业认证：')) realCareer = line.replace('职业认证：', '').trim();
           else if (line.startsWith('会员等级：')) vipInfo = line.replace('会员等级：', '').trim();
         } else if (currentSection === '【社交与互动数据】') {
           if (line.startsWith('粉丝数：')) {
@@ -367,6 +391,8 @@ export class BloggerProfileManager {
         verifiedReason,
         verifiedType,
         realAuth,
+        realName: realName || undefined,
+        realCareer: realCareer || undefined,
         description,
         followersCount,
         followersCountStr,
@@ -479,7 +505,8 @@ export class BloggerProfileManager {
           responseType: 'arraybuffer',
           headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Referer': 'https://weibo.com/'
+            'Referer': 'https://weibo.com/',
+            'Connection': 'close',
           },
           proxy: getAxiosProxyConfig(),
           timeout: 20000
@@ -616,10 +643,10 @@ export class BloggerProfileManager {
     const location = user.location || '未公开';
     const ipLocation = detail.ip_location ? detail.ip_location.replace(/^IP属地[：:]\s*/, '') : '未公开';
     const education = parseEducation(detail.education);
-    const career = parseCareer(detail.career, detail.company);
+    const { realAuth, realName, realCareer } = formatRealAuth(detail);
+    const career = parseCareer(detail.career, detail.company, realCareer);
     const sunshineCredit = detail.sunshine_credit?.level || '未公开';
     const createdAt = detail.created_at || '未公开';
-    const realAuth = formatRealAuth(detail);
     const verified = !!user.verified;
     const verifiedReason = user.verified_reason || detail.desc_text || '';
     const verifiedType = getVerifiedTypeDesc(verified, user.verified_type, user.verified_type_ext);
@@ -655,20 +682,26 @@ export class BloggerProfileManager {
 
     // 6. 下载媒体文件 (头像、手机背景、网页背景)
     const avatarUrl = user.avatar_hd || user.avatar_large || user.profile_image_url || '';
-    const rawCoverPhone = user.cover_image_phone || '';
-    const rawCoverWeb = user.cover_image || '';
+    const rawCoverPhone = (user.cover_image_phone || '').trim();
+    const rawCoverWeb = (user.cover_image || '').trim();
 
-    // 解析网页端超清原画背景大图：
-    // 微博 API 通常在 cover_image_phone 返回 /crop.0.0.640.640.640/ 裁剪缩略图，
-    // 将其裁剪前缀去除并转为 /large/，即可得到网页端实际展示的超清原画大图（高达 2160x2160 像素）
-    let coverWebUrl = '';
-    if (rawCoverWeb) {
-      coverWebUrl = rawCoverWeb.replace(/\/crop\.[^/]+\//, '/large/');
-    } else if (rawCoverPhone) {
-      coverWebUrl = rawCoverPhone.replace(/\/crop\.[^/]+\//, '/large/');
+    // 微博 API 在 cover_image_phone 中可能返回多张背景图（以分号 ; 分隔）
+    const phoneCovers = rawCoverPhone
+      .split(';')
+      .map((u: string) => u.trim())
+      .filter((u: string) => u.length > 0 && (u.startsWith('http://') || u.startsWith('https://')));
+
+    const primaryPhoneCover = phoneCovers[0] || '';
+
+    // 网页端超清原画背景大图：
+    // 若官方未提供 cover_image，则将手机端主背景的 /crop.xxx/ 转换为 /mw2000/ 超清大图
+    let coverWebUrl = rawCoverWeb;
+    let isWebCoverDerived = false;
+    if (!coverWebUrl && primaryPhoneCover) {
+      coverWebUrl = primaryPhoneCover.replace(/\/crop\.[^/]+\//, '/mw2000/');
+      isWebCoverDerived = true;
     }
-
-    const coverPhoneUrl = rawCoverPhone;
+    const coverPhoneUrl = primaryPhoneCover;
 
     const avatarLocalPath = path.join('profile', 'avatar.jpg').replace(/\\/g, '/');
     const coverPhoneLocalPath = path.join('profile', 'cover_phone.jpg').replace(/\\/g, '/');
@@ -688,6 +721,10 @@ export class BloggerProfileManager {
     if (!hasCoverWeb && coverWebUrl) {
       logger.info(`正在初次下载网页端主页背景图片 (超清原画): ${coverWebUrl}`);
       hasCoverWeb = await this.downloadMediaFile(coverWebUrl, coverWebLocalFull);
+      if (!hasCoverWeb && isWebCoverDerived && primaryPhoneCover && primaryPhoneCover !== coverWebUrl) {
+        logger.info(`超清原画背景下载未命中，正在回退下载默认背景主图: ${primaryPhoneCover}`);
+        hasCoverWeb = await this.downloadMediaFile(primaryPhoneCover, coverWebLocalFull);
+      }
     }
 
     let hasCoverPhone = fs.existsSync(coverPhoneLocalFull) && fs.statSync(coverPhoneLocalFull).size > 0;
@@ -714,6 +751,8 @@ export class BloggerProfileManager {
       verifiedReason,
       verifiedType,
       realAuth,
+      realName: realName || undefined,
+      realCareer: realCareer || undefined,
       description,
       followersCount,
       followersCountStr,
@@ -734,7 +773,8 @@ export class BloggerProfileManager {
         coverPhoneUrl,
         coverPhoneLocalPath: hasCoverPhone ? coverPhoneLocalPath : (hasCoverWeb ? '同网页端背景' : ''),
         coverWebUrl: coverWebUrl || undefined,
-        coverWebLocalPath: hasCoverWeb ? coverWebLocalPath : undefined
+        coverWebLocalPath: hasCoverWeb ? coverWebLocalPath : (hasCoverPhone ? '同手机端背景' : undefined),
+        allPhoneCoverUrls: phoneCovers,
       },
       rawInfo: raw.info,
       rawDetail: raw.detail,
@@ -785,6 +825,12 @@ export class BloggerProfileManager {
     text += `注册时间：${data.createdAt || '未公开'}\n`;
     text += `认证信息：${data.verified ? `已认证 (${data.verifiedType})${data.verifiedReason ? ` - ${data.verifiedReason}` : ''}` : '未认证'}\n`;
     text += `实名认证：${data.realAuth || '未公开'}\n`;
+    if (data.realName) {
+      text += `真实姓名：${data.realName}\n`;
+    }
+    if (data.realCareer) {
+      text += `职业认证：${data.realCareer}\n`;
+    }
     text += `会员等级：${data.vipInfo || '普通用户'}\n\n`;
 
     text += `【社交与互动数据】\n`;
@@ -806,7 +852,14 @@ export class BloggerProfileManager {
     text += `【多媒体资源】\n`;
     text += `头像：${data.media.avatarLocalPath || '无'}\n`;
     text += `网页端背景图片：${data.media.coverWebLocalPath || '默认背景'}\n`;
-    text += `手机端背景图片：${data.media.coverPhoneLocalPath || '默认背景'}\n\n`;
+    text += `手机端背景图片：${data.media.coverPhoneLocalPath || '默认背景'}\n`;
+    if (data.media.allPhoneCoverUrls && data.media.allPhoneCoverUrls.length > 1) {
+      text += `背景图图集 (${data.media.allPhoneCoverUrls.length} 张)：\n`;
+      data.media.allPhoneCoverUrls.forEach((u, i) => {
+        text += `  - [图${i + 1}] ${u}\n`;
+      });
+    }
+    text += `\n`;
 
     text += `【主页链接】\n`;
     text += `微博主页：${data.pageUrl}\n`;
