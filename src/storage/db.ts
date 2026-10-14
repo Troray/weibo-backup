@@ -61,6 +61,13 @@ function resolveMysqlConnection(): string | Knex.MySqlConnectionConfig {
     } else {
       logger.warn(`指定的 DB_SSL_CA 证书文件不存在: ${caPath}，将使用连接串默认设置。`);
     }
+  } else if (removedSslMode || !config.DB_SSL_REJECT_UNAUTHORIZED) {
+    return {
+      uri: sanitizedUri,
+      ssl: {
+        rejectUnauthorized: config.DB_SSL_REJECT_UNAUTHORIZED,
+      },
+    } as any;
   }
 
   return sanitizedUri;

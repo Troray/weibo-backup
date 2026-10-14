@@ -1,6 +1,18 @@
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '../.env') });
-const { getDb } = require(path.join(__dirname, '../dist/storage/db'));
+
+let getDb;
+try {
+  getDb = require(path.join(__dirname, '../dist/storage/db')).getDb;
+} catch (e) {
+  try {
+    require('ts-node/register');
+    getDb = require(path.join(__dirname, '../src/storage/db')).getDb;
+  } catch {
+    console.error('❌ 无法加载数据库模块。请先运行: npm run build');
+    process.exit(1);
+  }
+}
 
 async function checkDatabase() {
   const db = getDb();

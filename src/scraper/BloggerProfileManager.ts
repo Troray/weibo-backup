@@ -794,6 +794,20 @@ export class BloggerProfileManager {
         allWebCoverLocalPaths.push('');
       }
     }
+    
+    // 若博主未设置手机端多图背景，但配置了网页端主页背景图片，单独下载网页端背景
+    if (phoneCovers.length === 0 && rawCoverWeb) {
+      const wRel = path.join('profile', 'cover_web.jpg').replace(/\\/g, '/');
+      const wFull = path.join(userDir, 'profile', 'cover_web.jpg');
+      let wExists = fs.existsSync(wFull) && fs.statSync(wFull).size > 0;
+      if (!wExists) {
+        logger.info(`正在下载网页端主页背景图片: ${rawCoverWeb}`);
+        wExists = await this.downloadMediaFile(rawCoverWeb, wFull);
+      }
+      if (wExists) {
+        allWebCoverLocalPaths.push(wRel);
+      }
+    }
 
     const hasCoverPhone = allPhoneCoverLocalPaths.length > 0 && !!allPhoneCoverLocalPaths[0];
     const hasCoverWeb = allWebCoverLocalPaths.length > 0 && !!allWebCoverLocalPaths[0];
