@@ -28,6 +28,7 @@ export class TelegramBot {
   private static running = false;
   private static isCrawling = false;
   private static isLoggingIn = false;
+  private static schedulerTimer: NodeJS.Timeout | null = null;
 
   /**
    * Start the Telegram polling listener loop
@@ -91,6 +92,10 @@ export class TelegramBot {
    */
   static stop(): void {
     this.running = false;
+    if (this.schedulerTimer) {
+      clearInterval(this.schedulerTimer);
+      this.schedulerTimer = null;
+    }
     cleanupActiveHookProcess();
     logger.info("Telegram Bot listener daemon stopped.");
   }
@@ -126,7 +131,7 @@ export class TelegramBot {
     }
 
     const parts = text.split(/\s+/);
-    const command = parts[0].toLowerCase();
+    const command = parts[0].toLowerCase().split('@')[0];
 
     try {
       if (command === '/help') {
@@ -240,19 +245,19 @@ export class TelegramBot {
 
     // Run login check in background
     (async () => {
+      const originalMode = config.LOGIN_MODE;
       try {
-        const originalMode = config.LOGIN_MODE;
         // Temporarily force bot notify mode so QR code is sent to Telegram
         config.LOGIN_MODE = 'BOT_NOTIFY';
 
         await AuthManager.ensureLogin("✅ 扫码登录成功！当前会话已同步。");
 
-        config.LOGIN_MODE = originalMode;
         await Notifier.sendText("✅ 登录检查完毕，已成功登录！");
       } catch (err: any) {
         logger.error("Login failed during bot command", err);
         await Notifier.sendText(`❌ 登录检查失败: ${err.message || err}`);
       } finally {
+        config.LOGIN_MODE = originalMode;
         this.isLoggingIn = false;
       }
     })();
@@ -268,8 +273,13 @@ export class TelegramBot {
       return;
     }
 
-    this.isCrawling = true;
     const crawlInfo = getCrawlModeSummary();
+    if (crawlInfo.activeCount === 0) {
+      await Notifier.sendText("⚠️ 未配置或未启用任何有效博主（UID）。请先使用 /user add 添加或启用博主后再运行爬虫。");
+      return;
+    }
+
+    this.isCrawling = true;
 
     let startMsg = `🚀 【已启动微博增量同步任务】\n\n`;
     startMsg += `👥 目标博主: ${crawlInfo.usersDesc}\n`;
@@ -628,6 +638,10 @@ export class TelegramBot {
       await Notifier.sendText("⚠️ 爬虫正忙，为了防止冲突，请在任务结束后再进行删除。");
       return;
     }
+    if (this.isLoggingIn) {
+      await Notifier.sendText("⚠️ 正在执行登录检查，请待其完成后再执行删除操作。");
+      return;
+    }
 
     const dateMatch = target.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
     const isDate = !!dateMatch;
@@ -657,6 +671,8 @@ export class TelegramBot {
         return;
       }
     }
+
+    this.isCrawling = true;
 
     if (isDate) {
       const displayName = this.getBloggerDisplayName(resolvedUid);
@@ -692,6 +708,7 @@ export class TelegramBot {
       logger.error(`Error in bot delete command:`, err);
       await Notifier.sendText(`❌ 定向物理删除发生错误: ${err.message || err}`);
     } finally {
+      this.isCrawling = false;
       try {
         await closeDb();
       } catch { }
@@ -726,7 +743,12 @@ export class TelegramBot {
 
     const runRegistry = new Set<string>();
 
-    setInterval(async () => {
+    if (this.schedulerTimer) {
+      clearInterval(this.schedulerTimer);
+      this.schedulerTimer = null;
+    }
+
+    this.schedulerTimer = setInterval(async () => {
       try {
         const now = new Date();
         // 计算北京时间 (UTC+8)
@@ -762,6 +784,12 @@ export class TelegramBot {
             if (this.isLoggingIn) {
               logger.warn(`[Scheduler] 达到定时时间 ${pt.raw}，但正在执行登录检查。跳过本次定时爬取。`);
               await Notifier.sendText(`⚠️ [定时任务跳过提示] 达到定时自动爬取时间 (${pt.raw})，但系统当前正处于登录状态检查中，已跳过本次任务。`);
+              continue;
+            }
+
+            const activeUids = getActiveUids();
+            if (activeUids.length === 0) {
+              logger.warn(`[Scheduler] 达到定时时间 ${pt.raw}，但未找到任何启用的博主。跳过本次任务。`);
               continue;
             }
 
