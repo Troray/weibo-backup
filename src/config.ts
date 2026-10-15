@@ -168,7 +168,7 @@ export const config: ScraperConfig = {
   LARK_SECRET: getEnvStr('LARK_SECRET'),
   
   ONLY_ORIGINAL: getEnvBool('ONLY_ORIGINAL', false),
-  SCRAPE_COMMENTS: getEnvBool('SCRAPE_COMMENTS', true),
+  SCRAPE_COMMENTS: getEnvBool('SCRAPE_COMMENTS', false),
   MAX_COMMENTS_PER_POST: getEnvNum('MAX_COMMENTS_PER_POST', 50),
   COMMENT_FLOW: getEnvNum('COMMENT_FLOW', 0),
   MAX_SUB_COMMENTS_PER_COMMENT: getEnvNum('MAX_SUB_COMMENTS_PER_COMMENT', 50),
@@ -192,13 +192,12 @@ export const config: ScraperConfig = {
     if (!raw) return path.join(process.cwd(), 'output');
     return path.isAbsolute(raw) ? raw : path.resolve(process.cwd(), raw);
   })(),
-  SAVE_TYPES: getEnvArray('SAVE_TYPES', ['csv', 'json', 'markdown']),
+  SAVE_TYPES: getEnvArray('SAVE_TYPES', ['csv']),
   
   DB_TYPE: (() => {
     const val = getEnvStr('DB_TYPE');
-    if (val === undefined) return 'sqlite';
-    const trimmed = val.trim();
-    return trimmed ? (trimmed.toLowerCase() as DbType) : null;
+    if (!val || !val.trim()) return null;
+    return val.trim().toLowerCase() as DbType;
   })(),
   DB_URI: getEnvStr('DB_URI') || path.join(process.cwd(), 'weibo.sqlite'),
   DB_SSL: (() => {

@@ -237,7 +237,7 @@ function updateConfigInMemory(key: string, value: string): void {
     case 'OUTPUT_DIR': conf.OUTPUT_DIR = value; break;
     case 'SAVE_TYPES': conf.SAVE_TYPES = parseArray(value); break;
     
-    case 'DB_TYPE': conf.DB_TYPE = value ? value.toLowerCase() : null; break;
+    case 'DB_TYPE': conf.DB_TYPE = value && value.trim() ? (value.trim().toLowerCase() as any) : null; break;
     case 'DB_URI': conf.DB_URI = value; break;
     case 'DB_SSL': conf.DB_SSL = value === '' ? undefined : parseBool(value); break;
     case 'DB_SSL_CA': conf.DB_SSL_CA = value || undefined; break;
