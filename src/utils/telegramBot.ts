@@ -537,7 +537,13 @@ export class TelegramBot {
       return;
     }
 
-    const isDate = /^\d{4}-\d{2}-\d{2}$/.test(target);
+    const dateMatch = target.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+    const isDate = !!dateMatch;
+    let targetDate = target;
+    if (dateMatch) {
+      targetDate = `${dateMatch[1]}-${dateMatch[2].padStart(2, '0')}-${dateMatch[3].padStart(2, '0')}`;
+    }
+
     let resolvedUid = "";
     if (isDate) {
       try {
@@ -551,7 +557,7 @@ export class TelegramBot {
           await Notifier.sendText("❌ 错误：在用户配置中未找到启用的博主。");
           return;
         } else {
-          await Notifier.sendText(`❌ 错误：配置了多个博主，请指定 UID：\`/c ${target} <UID>\``, 'Markdown');
+          await Notifier.sendText(`❌ 错误：配置了多个博主，请指定 UID：\`/c ${targetDate} <UID>\``, 'Markdown');
           return;
         }
       } catch (err: any) {
@@ -565,7 +571,7 @@ export class TelegramBot {
       const displayName = this.getBloggerDisplayName(resolvedUid);
       let startMsg = `🚀 【已启动定向日期爬取任务】\n\n`;
       startMsg += `👤 目标博主: ${displayName}\n`;
-      startMsg += `📅 目标日期: ${target}\n`;
+      startMsg += `📅 目标日期: ${targetDate}\n`;
       startMsg += `⚙️ 运行策略:\n`;
       startMsg += `  • 博文过滤: ${config.ONLY_ORIGINAL ? '仅原创博文' : '全量 (原创 + 转发)'}\n`;
       startMsg += `  • 评论抓取: ${config.SCRAPE_COMMENTS ? `已开启 (最大上限: ${config.MAX_COMMENTS_PER_POST} 条/篇)` : '已关闭'}\n`;
@@ -590,7 +596,7 @@ export class TelegramBot {
         const scraper = new WeiboScraper();
         let res;
         if (isDate) {
-          res = await scraper.crawlDateForUser(resolvedUid, target, 'TG_BOT');
+          res = await scraper.crawlDateForUser(resolvedUid, targetDate, 'TG_BOT');
         } else {
           res = await scraper.crawlSinglePost(target, 'TG_BOT');
         }
@@ -623,7 +629,13 @@ export class TelegramBot {
       return;
     }
 
-    const isDate = /^\d{4}-\d{2}-\d{2}$/.test(target);
+    const dateMatch = target.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+    const isDate = !!dateMatch;
+    let targetDate = target;
+    if (dateMatch) {
+      targetDate = `${dateMatch[1]}-${dateMatch[2].padStart(2, '0')}-${dateMatch[3].padStart(2, '0')}`;
+    }
+
     let resolvedUid = "";
     if (isDate) {
       try {
@@ -637,7 +649,7 @@ export class TelegramBot {
           await Notifier.sendText("❌ 错误：在用户配置中未找到启用的博主。");
           return;
         } else {
-          await Notifier.sendText(`❌ 错误：配置了多个博主，请指定 UID：\`/d ${target} <UID>\``, 'Markdown');
+          await Notifier.sendText(`❌ 错误：配置了多个博主，请指定 UID：\`/d ${targetDate} <UID>\``, 'Markdown');
           return;
         }
       } catch (err: any) {
@@ -650,7 +662,7 @@ export class TelegramBot {
       const displayName = this.getBloggerDisplayName(resolvedUid);
       let startMsg = `🗑️ 【已启动定向日期物理清理任务】\n\n`;
       startMsg += `👤 目标博主: ${displayName}\n`;
-      startMsg += `📅 目标日期: ${target}\n`;
+      startMsg += `📅 目标日期: ${targetDate}\n`;
       startMsg += `⚠️ 操作说明: 将彻底删除该日期的微博、评论、本地图片/视频等磁盘媒体文件，并同步更新 Markdown、JSON、CSV 及数据库。\n\n`;
       startMsg += `⏳ 正在执行物理清除，完成后将推送清理明细报告...`;
       await Notifier.sendText(startMsg);
@@ -666,7 +678,7 @@ export class TelegramBot {
       let res;
       if (isDate) {
         const { deleteDateData } = require('../storage/deleteUtility');
-        res = await deleteDateData(resolvedUid, target);
+        res = await deleteDateData(resolvedUid, targetDate);
       } else {
         res = await deletePostData(target);
       }
