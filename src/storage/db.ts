@@ -8,43 +8,74 @@ let dbInstance: Knex | null = null;
 
 /**
  * 规范化并清洗 MySQL 连接配置：
- * 1. 兼容云服务商（如 Aiven, TiDB, RDS）连接串中自带的 ssl-mode / sslmode 参数，防止触发 mysql2 驱动配置警告或未来抛错；
- * 2. 如果配置了 DB_SSL_CA，则自动加载 CA 证书文件并注入安全 SSL 连接选项；
- * 3. 保持与原生 MySQL2 连接配置的完全兼容。
+ * 1. 本地 / 内网环境（默认）：未指定 SSL 模式且无 CA 证书时，保持原生纯文本传输，绝不注入 ssl 配置，确保本地/内网数据库开箱即用；
+ * 2. 云数据库环境：识别连接串中的 ssl-mode / sslmode / ssl 参数并清洗剥离，避免触发 mysql2 驱动配置警告；
+ * 3. 自定义 CA 证书：若配置了 DB_SSL_CA，自动加载 CA 证书文件并注入安全 SSL 连接选项；
+ * 4. 显式配置覆盖：支持通过环境变量 DB_SSL=true/false 或 URI 参数 (?ssl=true/false) 强制开启或关闭 SSL。
  */
-function resolveMysqlConnection(): string | Knex.MySqlConnectionConfig {
+export function resolveMysqlConnection(): string | Knex.MySqlConnectionConfig {
   const rawUri = config.DB_URI;
   let sanitizedUri = rawUri;
-  let removedSslMode = false;
+  let sslRequested: boolean | undefined = config.DB_SSL;
+  let removedSslParam = false;
 
   try {
     const parsed = new URL(rawUri);
-    if (parsed.searchParams.has('ssl-mode')) {
+    const sslParam = parsed.searchParams.get('ssl');
+    const sslModeParam = parsed.searchParams.get('ssl-mode') || parsed.searchParams.get('sslmode');
+
+    if (sslParam !== null) {
+      if (['false', '0', 'disable', 'off', 'no'].includes(sslParam.toLowerCase())) {
+        if (sslRequested === undefined) sslRequested = false;
+      } else if (['true', '1', 'require', 'required', 'on', 'yes'].includes(sslParam.toLowerCase())) {
+        if (sslRequested === undefined) sslRequested = true;
+      }
+      parsed.searchParams.delete('ssl');
+      removedSslParam = true;
+    }
+
+    if (sslModeParam !== null) {
+      if (sslModeParam.toLowerCase() === 'disable') {
+        if (sslRequested === undefined) sslRequested = false;
+      } else {
+        if (sslRequested === undefined) sslRequested = true;
+      }
       parsed.searchParams.delete('ssl-mode');
-      removedSslMode = true;
-    }
-    if (parsed.searchParams.has('sslmode')) {
       parsed.searchParams.delete('sslmode');
-      removedSslMode = true;
+      removedSslParam = true;
     }
+
     sanitizedUri = parsed.toString();
   } catch {
+    if (/[\?&]ssl=(false|0|disable|off|no)(?:&|$)/i.test(rawUri)) {
+      if (sslRequested === undefined) sslRequested = false;
+    } else if (/[\?&]ssl=(true|1|require|required|on|yes)(?:&|$)/i.test(rawUri)) {
+      if (sslRequested === undefined) sslRequested = true;
+    }
+
+    if (/[\?&]ssl-?mode=disable(?:&|$)/i.test(rawUri)) {
+      if (sslRequested === undefined) sslRequested = false;
+    } else if (/[\?&]ssl-?mode=[^&]+/i.test(rawUri)) {
+      if (sslRequested === undefined) sslRequested = true;
+    }
+
     const cleaned = rawUri
       .replace(/[?&]ssl-mode=[^&]*/gi, '')
       .replace(/[?&]sslmode=[^&]*/gi, '')
+      .replace(/[?&]ssl=[^&]*/gi, '')
       .replace(/\?&/, '?')
       .replace(/\?$/, '');
     if (cleaned !== rawUri) {
       sanitizedUri = cleaned;
-      removedSslMode = true;
+      removedSslParam = true;
     }
   }
 
-  if (removedSslMode) {
-    logger.info('已自动处理并剥离 MySQL 连接串中不被 mysql2 驱动直接支持的 ssl-mode 参数，避免触发驱动警告。');
+  if (removedSslParam) {
+    logger.info('已自动处理并剥离 MySQL 连接串中不被 mysql2 驱动直接支持的 ssl-mode/ssl 参数，避免触发驱动警告。');
   }
 
-  // 检查是否配置了自定义 SSL CA 证书
+  // 1. 自定义 CA 证书：若配置了 DB_SSL_CA，优先加载证书并启用安全 SSL 连接
   if (config.DB_SSL_CA) {
     const caPath = path.isAbsolute(config.DB_SSL_CA)
       ? config.DB_SSL_CA
@@ -61,7 +92,11 @@ function resolveMysqlConnection(): string | Knex.MySqlConnectionConfig {
     } else {
       logger.warn(`指定的 DB_SSL_CA 证书文件不存在: ${caPath}，将使用连接串默认设置。`);
     }
-  } else if (removedSslMode || !config.DB_SSL_REJECT_UNAUTHORIZED) {
+  }
+
+  // 2. 若显式或推导需要启用 SSL（如云数据库的 ssl-mode 参数或 DB_SSL=true）
+  if (sslRequested === true) {
+    logger.info(`已启用 MySQL SSL 安全加密连接 (rejectUnauthorized=${config.DB_SSL_REJECT_UNAUTHORIZED})。`);
     return {
       uri: sanitizedUri,
       ssl: {
@@ -70,79 +105,110 @@ function resolveMysqlConnection(): string | Knex.MySqlConnectionConfig {
     } as any;
   }
 
+  // 3. 默认情况（本地环境、内网无 SSL 数据库）：原生明文连接，不注入 ssl 参数
   return sanitizedUri;
 }
 
 /**
  * 规范化并清洗 PostgreSQL 连接配置：
- * 1. 兼容云服务商（如 Aiven, Supabase, Neon）连接串中自带的 sslmode / ssl-mode 参数；
- * 2. 剥离 query 中的 sslmode，避免 pg 驱动内部覆盖 rejectUnauthorized 选项并引发 self-signed certificate in certificate chain 错误；
- * 3. 支持 DB_SSL_REJECT_UNAUTHORIZED（默认为 false 兼容云端自签名证书）；
- * 4. 支持 DB_SSL_CA 自定义证书加载。
+ * 1. 本地 / 内网环境（默认）：未指定 SSL 模式且无 CA 证书时，保持原生纯文本传输；
+ * 2. 兼容云服务商（如 Aiven, Supabase, Neon）连接串中自带的 sslmode / ssl-mode / ssl 参数；
+ * 3. 剥离 query 中的 sslmode，避免 pg 驱动内部覆盖 rejectUnauthorized 选项并引发 self-signed certificate in certificate chain 错误；
+ * 4. 支持 DB_SSL_REJECT_UNAUTHORIZED（默认为 false 兼容云端自签名证书）；
+ * 5. 支持 DB_SSL_CA 自定义证书加载；
+ * 6. 支持 DB_SSL 环境变量显式强控。
  */
-function resolvePostgresConnection(): string | Knex.PgConnectionConfig {
+export function resolvePostgresConnection(): string | Knex.PgConnectionConfig {
   const rawUri = config.DB_URI;
   let sanitizedUri = rawUri;
-  let hasSslParam = false;
+  let sslRequested: boolean | undefined = config.DB_SSL;
+  let removedSslParam = false;
 
   try {
     const parsed = new URL(rawUri);
-    if (parsed.searchParams.has('sslmode')) {
+    const sslParam = parsed.searchParams.get('ssl');
+    const sslModeParam = parsed.searchParams.get('sslmode') || parsed.searchParams.get('ssl-mode');
+
+    if (sslParam !== null) {
+      if (['false', '0', 'disable', 'off', 'no'].includes(sslParam.toLowerCase())) {
+        if (sslRequested === undefined) sslRequested = false;
+      } else if (['true', '1', 'require', 'required', 'on', 'yes'].includes(sslParam.toLowerCase())) {
+        if (sslRequested === undefined) sslRequested = true;
+      }
+      parsed.searchParams.delete('ssl');
+      removedSslParam = true;
+    }
+
+    if (sslModeParam !== null) {
+      if (sslModeParam.toLowerCase() === 'disable') {
+        if (sslRequested === undefined) sslRequested = false;
+      } else {
+        if (sslRequested === undefined) sslRequested = true;
+      }
       parsed.searchParams.delete('sslmode');
-      hasSslParam = true;
-    }
-    if (parsed.searchParams.has('ssl-mode')) {
       parsed.searchParams.delete('ssl-mode');
-      hasSslParam = true;
+      removedSslParam = true;
     }
+
     sanitizedUri = parsed.toString();
   } catch {
+    if (/[\?&]ssl=(false|0|disable|off|no)(?:&|$)/i.test(rawUri)) {
+      if (sslRequested === undefined) sslRequested = false;
+    } else if (/[\?&]ssl=(true|1|require|required|on|yes)(?:&|$)/i.test(rawUri)) {
+      if (sslRequested === undefined) sslRequested = true;
+    }
+
+    if (/[\?&]ssl-?mode=disable(?:&|$)/i.test(rawUri)) {
+      if (sslRequested === undefined) sslRequested = false;
+    } else if (/[\?&]ssl-?mode=[^&]+/i.test(rawUri)) {
+      if (sslRequested === undefined) sslRequested = true;
+    }
+
     const cleaned = rawUri
       .replace(/[?&]sslmode=[^&]*/gi, '')
       .replace(/[?&]ssl-mode=[^&]*/gi, '')
+      .replace(/[?&]ssl=[^&]*/gi, '')
       .replace(/\?&/, '?')
       .replace(/\?$/, '');
     if (cleaned !== rawUri) {
       sanitizedUri = cleaned;
-      hasSslParam = true;
+      removedSslParam = true;
     }
   }
 
-  // 构建 SSL 配置
-  let sslConfig: any = false;
-
+  // 1. 自定义 CA
   if (config.DB_SSL_CA) {
     const caPath = path.isAbsolute(config.DB_SSL_CA)
       ? config.DB_SSL_CA
       : path.resolve(process.cwd(), config.DB_SSL_CA);
     if (fs.existsSync(caPath)) {
       logger.info(`已加载自定义 PostgreSQL SSL CA 证书: ${caPath}`);
-      sslConfig = {
-        ca: fs.readFileSync(caPath),
-        rejectUnauthorized: config.DB_SSL_REJECT_UNAUTHORIZED,
-      };
+      return {
+        connectionString: sanitizedUri,
+        ssl: {
+          ca: fs.readFileSync(caPath),
+          rejectUnauthorized: config.DB_SSL_REJECT_UNAUTHORIZED,
+        },
+      } as any;
     } else {
       logger.warn(`指定的 DB_SSL_CA 证书文件不存在: ${caPath}，将使用基础 SSL 设置。`);
-      sslConfig = {
-        rejectUnauthorized: config.DB_SSL_REJECT_UNAUTHORIZED,
-      };
     }
-  } else if (hasSslParam || rawUri.includes('sslmode') || rawUri.includes('ssl-mode')) {
-    sslConfig = {
-      rejectUnauthorized: config.DB_SSL_REJECT_UNAUTHORIZED,
-    };
   }
 
-  if (sslConfig !== false) {
-    if (hasSslParam) {
+  // 2. 启用 SSL
+  if (sslRequested === true) {
+    if (removedSslParam) {
       logger.info(`已自动规范化 PostgreSQL 连接参数并配置安全连接 (rejectUnauthorized=${config.DB_SSL_REJECT_UNAUTHORIZED})。`);
     }
     return {
       connectionString: sanitizedUri,
-      ssl: sslConfig,
+      ssl: {
+        rejectUnauthorized: config.DB_SSL_REJECT_UNAUTHORIZED,
+      },
     } as any;
   }
 
+  // 3. 默认明文连接
   return sanitizedUri;
 }
 

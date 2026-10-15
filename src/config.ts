@@ -73,6 +73,7 @@ export interface ScraperConfig {
   // 关系型数据库配置
   DB_TYPE: DbType | null; // 数据库类型（sqlite, mysql, postgres，若留空则为 null）
   DB_URI: string; // 数据库连接地址。SQLite 填写文件路径，MySQL/PG 填写 URI 连接字符串
+  DB_SSL?: boolean; // 是否显式启用 SSL（可选：true 强制开启，false 强制关闭；留空则根据 URI 和 CA 证书自动判断）
   DB_SSL_CA?: string; // 自定义 SSL CA 证书路径（适用于云数据库如 Aiven、AWS RDS 等提供的 ca.pem）
   DB_SSL_REJECT_UNAUTHORIZED: boolean; // 是否严格校验 SSL 证书合法性（默认 true，若遇到自签名证书可设为 false）
   
@@ -200,6 +201,11 @@ export const config: ScraperConfig = {
     return trimmed ? (trimmed.toLowerCase() as DbType) : null;
   })(),
   DB_URI: getEnvStr('DB_URI') || path.join(process.cwd(), 'weibo.sqlite'),
+  DB_SSL: (() => {
+    const raw = getEnvStr('DB_SSL');
+    if (raw === undefined || raw === '') return undefined;
+    return raw.toLowerCase() === 'true' || raw === '1';
+  })(),
   DB_SSL_CA: getEnvStr('DB_SSL_CA') || undefined,
   DB_SSL_REJECT_UNAUTHORIZED: getEnvBool('DB_SSL_REJECT_UNAUTHORIZED', false),
   
