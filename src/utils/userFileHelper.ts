@@ -137,8 +137,9 @@ export function formatCursorDateStr(val?: string | null): string {
     return getBeijingDateParts(ts).dateStr;
   }
   const normalized = val.trim().replace(/\//g, '-');
-  if (/^\d{4}-\d{1,2}-\d{1,2}/.test(normalized)) {
-    return normalized.substring(0, 10);
+  const m = normalized.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) {
+    return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
   }
   return '';
 }
@@ -356,9 +357,12 @@ export function writeUsers(entries: UserEntry[]): void {
       }
       const prefix = entry.isCommented ? '#' : '';
       let parts: string[];
-      if (!entry.name && entry.cursor && !entry.endDate) {
-        // Omit empty name column to keep clean 'UID | cursor' format
+      if (!entry.name && entry.cursor) {
+        // Omit empty name column to keep clean format: 'UID | cursor' or 'UID | cursor | endDate'
         parts = [`${prefix}${entry.uid}`, entry.cursor];
+        if (entry.endDate) {
+          parts.push(entry.endDate);
+        }
       } else {
         parts = [
           `${prefix}${entry.uid}`,
