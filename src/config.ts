@@ -73,6 +73,7 @@ export interface ScraperConfig {
   // 关系型数据库配置
   DB_TYPE: DbType | null; // 数据库类型（sqlite, mysql, postgres，若留空则为 null）
   DB_URI: string; // 数据库连接地址。SQLite 填写文件路径，MySQL/PG 填写 URI 连接字符串
+  DB_SSL?: boolean; // 是否显式启用 SSL（可选：true 强制开启，false 强制关闭；留空则根据 URI 和 CA 证书自动判断）
   DB_SSL_CA?: string; // 自定义 SSL CA 证书路径（适用于云数据库如 Aiven、AWS RDS 等提供的 ca.pem）
   DB_SSL_REJECT_UNAUTHORIZED: boolean; // 是否严格校验 SSL 证书合法性（默认 true，若遇到自签名证书可设为 false）
   
@@ -167,7 +168,7 @@ export const config: ScraperConfig = {
   LARK_SECRET: getEnvStr('LARK_SECRET'),
   
   ONLY_ORIGINAL: getEnvBool('ONLY_ORIGINAL', false),
-  SCRAPE_COMMENTS: getEnvBool('SCRAPE_COMMENTS', true),
+  SCRAPE_COMMENTS: getEnvBool('SCRAPE_COMMENTS', false),
   MAX_COMMENTS_PER_POST: getEnvNum('MAX_COMMENTS_PER_POST', 50),
   COMMENT_FLOW: getEnvNum('COMMENT_FLOW', 0),
   MAX_SUB_COMMENTS_PER_COMMENT: getEnvNum('MAX_SUB_COMMENTS_PER_COMMENT', 50),
@@ -191,15 +192,19 @@ export const config: ScraperConfig = {
     if (!raw) return path.join(process.cwd(), 'output');
     return path.isAbsolute(raw) ? raw : path.resolve(process.cwd(), raw);
   })(),
-  SAVE_TYPES: getEnvArray('SAVE_TYPES', ['csv', 'json', 'markdown']),
+  SAVE_TYPES: getEnvArray('SAVE_TYPES', ['csv']),
   
   DB_TYPE: (() => {
     const val = getEnvStr('DB_TYPE');
-    if (val === undefined) return 'sqlite';
-    const trimmed = val.trim();
-    return trimmed ? (trimmed.toLowerCase() as DbType) : null;
+    if (!val || !val.trim()) return null;
+    return val.trim().toLowerCase() as DbType;
   })(),
   DB_URI: getEnvStr('DB_URI') || path.join(process.cwd(), 'weibo.sqlite'),
+  DB_SSL: (() => {
+    const raw = getEnvStr('DB_SSL');
+    if (raw === undefined || raw === '') return undefined;
+    return raw.toLowerCase() === 'true' || raw === '1';
+  })(),
   DB_SSL_CA: getEnvStr('DB_SSL_CA') || undefined,
   DB_SSL_REJECT_UNAUTHORIZED: getEnvBool('DB_SSL_REJECT_UNAUTHORIZED', false),
   
