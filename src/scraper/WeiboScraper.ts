@@ -21,7 +21,8 @@ import {
   getBeijingDateParts, 
   getTodayString, 
   formatToMinute, 
-  parseCursorToTimestamp 
+  parseCursorToTimestamp,
+  formatCursorDateStr
 } from '../utils/userFileHelper';
 import { executePostScript, formatHookSummaryForReport, HookContext } from '../utils/postScriptRunner';
 import { escapeHtml } from '../utils/htmlHelper';
@@ -33,8 +34,15 @@ export { SessionExpiredError };
 
 function getDateRange(startDate: string, endDate: string, order: 'asc' | 'desc'): string[] {
   const days: string[] = [];
-  const start = new Date(startDate + 'T00:00:00');
-  const end = new Date(endDate + 'T00:00:00');
+  const sStr = formatCursorDateStr(startDate) || startDate.split(/[ T]/)[0];
+  const eStr = formatCursorDateStr(endDate) || endDate.split(/[ T]/)[0];
+  const start = new Date(sStr + 'T00:00:00');
+  const end = new Date(eStr + 'T00:00:00');
+
+  if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+    logger.error(`无效的爬取日期区间: startDate=${startDate} (${sStr}), endDate=${endDate} (${eStr})`);
+    return days;
+  }
 
   const current = new Date(start);
   while (current <= end) {
@@ -327,18 +335,19 @@ export class WeiboScraper {
         const currentNowStr = formatToMinute(now);
         const todayStr = getTodayString();
         const userEndDate = userEntry?.endDate;
-        const effectiveEndDate = userEndDate || config.END_DATE || todayStr;
+        const normalizedEndDate = formatCursorDateStr(userEndDate);
+        const effectiveEndDate = normalizedEndDate || formatCursorDateStr(config.END_DATE) || config.END_DATE || todayStr;
 
         if (cursor > 0) {
           const bp = getBeijingDateParts(cursor);
           startDateTimeStr = bp.minuteStr;
           startDateStr = bp.dateStr;
         } else if (config.START_DATE) {
-          startDateStr = config.START_DATE;
-          startDateTimeStr = `${config.START_DATE} 00:00`;
+          startDateStr = formatCursorDateStr(config.START_DATE) || config.START_DATE;
+          startDateTimeStr = `${startDateStr} 00:00`;
         }
 
-        const configuredEndDate = userEndDate || config.END_DATE;
+        const configuredEndDate = normalizedEndDate || formatCursorDateStr(config.END_DATE) || config.END_DATE;
         if (configuredEndDate && configuredEndDate !== todayStr) {
           endDateTimeStr = `${configuredEndDate} 23:59`;
         } else {
@@ -777,7 +786,8 @@ export class WeiboScraper {
 
     // 仅当抓取正常结束（到达末尾或遇到已知游标）时才推进游标，严防因网络异常导致游标过早跳变而漏抓老微博
     if (crawlCompletedNormally) {
-      const targetEnd = userData?.effectiveEndDate || config.END_DATE;
+      const rawEnd = userData?.effectiveEndDate || config.END_DATE;
+      const targetEnd = formatCursorDateStr(rawEnd) || rawEnd;
       let cursorTimestamp = latestPostTimestamp > 0 ? latestPostTimestamp : Date.now();
       if (targetEnd && targetEnd !== getTodayString()) {
         const endTs = Date.parse(`${targetEnd}T23:59:59+08:00`);
@@ -942,7 +952,8 @@ export class WeiboScraper {
       logger.info(`已完成日期 ${currentDay} 的所有搜索页爬取。`);
       if (!isTargeted) {
         let cursorTimestamp = Date.now();
-        const targetEnd = effectiveEndDate || config.END_DATE;
+        const rawEnd = effectiveEndDate || config.END_DATE;
+        const targetEnd = formatCursorDateStr(rawEnd) || rawEnd;
         if (targetEnd && currentDay === targetEnd) {
           if (targetEnd !== getTodayString()) {
             const endTs = Date.parse(`${targetEnd}T23:59:59+08:00`);
@@ -1627,7 +1638,11 @@ export class WeiboScraper {
   /**
    * Crawl all posts of a specific date for a specific UID
    */
-  async crawlDateForUser(uid: string, dateStr: string, triggerSource: 'CLI' | 'TG_BOT' = 'CLI'): Promise<{ success: boolean; message: string }> {
+  async crawlDateForUser(uid: string, rawDateStr: string, triggerSource: 'CLI' | 'TG_BOT' = 'CLI'): Promise<{ success: boolean; message: string }> {
+    const dateMatch = rawDateStr.trim().match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+    const dateStr = dateMatch
+      ? `${dateMatch[1]}-${dateMatch[2].padStart(2, '0')}-${dateMatch[3].padStart(2, '0')}`
+      : rawDateStr.trim();
     // 自动同步并归档博主详细资料（<UID>.txt 及 profile/ 头像与背景图片）
     const knownName = this.getBloggerName(uid);
     const profile = await BloggerProfileManager.getInstance().ensureBloggerProfile(uid, knownName);

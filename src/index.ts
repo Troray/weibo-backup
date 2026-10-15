@@ -137,8 +137,12 @@ async function start() {
   };
 
   if (crawlIdx > -1 && args[crawlIdx + 1]) {
-    const target = args[crawlIdx + 1];
-    const isDate = /^\d{4}-\d{2}-\d{2}$/.test(target);
+    const rawTarget = args[crawlIdx + 1];
+    const dateMatch = rawTarget.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+    const isDate = !!dateMatch;
+    const target = dateMatch
+      ? `${dateMatch[1]}-${dateMatch[2].padStart(2, '0')}-${dateMatch[3].padStart(2, '0')}`
+      : rawTarget;
     const scraper = new WeiboScraper();
     activeScraper = scraper;
     let res;
@@ -189,8 +193,12 @@ async function start() {
   }
 
   if (deleteIdx > -1 && args[deleteIdx + 1]) {
-    const target = args[deleteIdx + 1];
-    const isDate = /^\d{4}-\d{2}-\d{2}$/.test(target);
+    const rawTarget = args[deleteIdx + 1];
+    const dateMatch = rawTarget.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+    const isDate = !!dateMatch;
+    const target = dateMatch
+      ? `${dateMatch[1]}-${dateMatch[2].padStart(2, '0')}-${dateMatch[3].padStart(2, '0')}`
+      : rawTarget;
     const { deletePostData, deleteDateData } = require('./storage/deleteUtility');
     let res;
 
@@ -293,7 +301,6 @@ async function runSingleScrape() {
 
     const summary = await scraper.run('CLI');
     await closeDb();
-    logger.info('微博爬虫增量同步运行成功！');
     await Notifier.sendText(summary);
   } catch (error: any) {
     logger.error('微博爬虫运行中发生致命错误:', error);

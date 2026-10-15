@@ -619,7 +619,11 @@ function findFirstJsonFileForUser(bloggerPath: string, uid: string): boolean {
 /**
  * Delete all post data for a specific date and blogger UID in an efficient batch operation
  */
-export async function deleteDateData(uid: string, dateStr: string): Promise<{ success: boolean; message: string }> {
+export async function deleteDateData(uid: string, rawDateStr: string): Promise<{ success: boolean; message: string }> {
+  const dateMatch = rawDateStr.trim().match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+  const dateStr = dateMatch
+    ? `${dateMatch[1]}-${dateMatch[2].padStart(2, '0')}-${dateMatch[3].padStart(2, '0')}`
+    : rawDateStr.trim();
   const startTime = Date.now();
   // Resolve displayName (Nickname (UID) or just UID) for clearer logging
   let displayName = uid;
