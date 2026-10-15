@@ -59,12 +59,15 @@ export function resolveMysqlConnection(): string | Knex.MySqlConnectionConfig {
       if (sslRequested === undefined) sslRequested = true;
     }
 
-    const cleaned = rawUri
+    let cleaned = rawUri
       .replace(/[?&]ssl-mode=[^&]*/gi, '')
       .replace(/[?&]sslmode=[^&]*/gi, '')
       .replace(/[?&]ssl=[^&]*/gi, '')
       .replace(/\?&/, '?')
       .replace(/\?$/, '');
+    if (!cleaned.includes('?') && cleaned.includes('&')) {
+      cleaned = cleaned.replace('&', '?');
+    }
     if (cleaned !== rawUri) {
       sanitizedUri = cleaned;
       removedSslParam = true;
@@ -164,12 +167,15 @@ export function resolvePostgresConnection(): string | Knex.PgConnectionConfig {
       if (sslRequested === undefined) sslRequested = true;
     }
 
-    const cleaned = rawUri
+    let cleaned = rawUri
       .replace(/[?&]sslmode=[^&]*/gi, '')
       .replace(/[?&]ssl-mode=[^&]*/gi, '')
       .replace(/[?&]ssl=[^&]*/gi, '')
       .replace(/\?&/, '?')
       .replace(/\?$/, '');
+    if (!cleaned.includes('?') && cleaned.includes('&')) {
+      cleaned = cleaned.replace('&', '?');
+    }
     if (cleaned !== rawUri) {
       sanitizedUri = cleaned;
       removedSslParam = true;
