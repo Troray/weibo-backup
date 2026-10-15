@@ -219,6 +219,7 @@ function updateConfigInMemory(key: string, value: string): void {
     case 'MAX_COMMENTS_PER_POST': conf.MAX_COMMENTS_PER_POST = parseNum(value); break;
     case 'COMMENT_FLOW': conf.COMMENT_FLOW = parseNum(value); break;
     case 'MAX_SUB_COMMENTS_PER_COMMENT': conf.MAX_SUB_COMMENTS_PER_COMMENT = parseNum(value); break;
+    case 'COMMENT_CHUNKING_THRESHOLD': conf.COMMENT_CHUNKING_THRESHOLD = parseNum(value); break;
     case 'REQUEST_DELAY_MIN': conf.REQUEST_DELAY_MIN = parseNum(value); break;
     case 'REQUEST_DELAY_MAX': conf.REQUEST_DELAY_MAX = parseNum(value); break;
     
@@ -238,6 +239,9 @@ function updateConfigInMemory(key: string, value: string): void {
     
     case 'DB_TYPE': conf.DB_TYPE = value ? value.toLowerCase() : null; break;
     case 'DB_URI': conf.DB_URI = value; break;
+    case 'DB_SSL': conf.DB_SSL = value === '' ? undefined : parseBool(value); break;
+    case 'DB_SSL_CA': conf.DB_SSL_CA = value || undefined; break;
+    case 'DB_SSL_REJECT_UNAUTHORIZED': conf.DB_SSL_REJECT_UNAUTHORIZED = parseBool(value); break;
 
     case 'POST_SCRIPT_COMMAND': conf.POST_SCRIPT_COMMAND = value || undefined; break;
     case 'POST_SCRIPT_TRIGGER': conf.POST_SCRIPT_TRIGGER = value || 'has_new_data'; break;
