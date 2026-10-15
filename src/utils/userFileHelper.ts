@@ -43,7 +43,8 @@ export function formatToMinute(input: Date | number): string {
   return getBeijingDateParts(input).minuteStr;
 }
 
-export function parseCursorToTimestamp(str: string): number {
+export function parseCursorToTimestamp(str?: string | null): number {
+  if (!str) return 0;
   const trimmed = str.trim();
   if (!trimmed) return 0;
   if (/^\d{10,13}$/.test(trimmed)) {
@@ -129,7 +130,7 @@ export function getBloggerDisplayName(uid: string): string {
   return uid;
 }
 
-export function formatCursorDateStr(val?: string): string {
+export function formatCursorDateStr(val?: string | null): string {
   if (!val) return '';
   const ts = parseCursorToTimestamp(val);
   if (ts > 0) {
@@ -207,6 +208,10 @@ export function readUsers(): UserEntry[] {
       // Check if it's pipe-separated
       if (workLine.includes('|')) {
         const parts = workLine.split('|').map(p => p.trim());
+        // Clean trailing empty tokens caused by trailing pipe delimiters (e.g. "UID | 2025-01-01 | 2025-12-31 | ")
+        while (parts.length > 1 && parts[parts.length - 1] === '') {
+          parts.pop();
+        }
         const firstPart = parts[0];
 
         // A valid UID must be numeric
@@ -236,11 +241,18 @@ export function readUsers(): UserEntry[] {
               cursor = p2;
             }
           } else if (parts.length >= 4) {
-            name = parts[1] || '';
-            cursor = parts[2] || '';
-            const p3 = parts[3] || '';
-            if (isDateOrTimestamp(p3)) {
-              endDate = p3;
+            if (isStrictDateString(parts[1]) && isStrictDateString(parts[2])) {
+              // Format: UID | cursor | endDate [| extra]
+              cursor = parts[1];
+              endDate = parts[2];
+            } else {
+              // Standard: UID | name | cursor | endDate
+              name = parts[1] || '';
+              cursor = parts[2] || '';
+              const p3 = parts[3] || '';
+              if (isDateOrTimestamp(p3)) {
+                endDate = p3;
+              }
             }
           }
 
