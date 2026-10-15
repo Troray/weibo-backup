@@ -11,7 +11,8 @@ import {
   isUserListFile, 
   getActiveUids, 
   getUserFilePath, 
-  getBloggerDisplayName 
+  getBloggerDisplayName,
+  formatCursorDateStr 
 } from './userFileHelper';
 import { readEnv, writeEnv } from './envHelper';
 import { WeiboScraper } from '../scraper/WeiboScraper';
@@ -241,12 +242,12 @@ export class TelegramBot {
     }
 
     this.isLoggingIn = true;
-    await Notifier.sendText("🔍 正在检查登录状态... 若需要重新扫码，稍后将发送二维码图片。");
 
     // Run login check in background
     (async () => {
       const originalMode = config.LOGIN_MODE;
       try {
+        await Notifier.sendText("🔍 正在检查登录状态... 若需要重新扫码，稍后将发送二维码图片。");
         // Temporarily force bot notify mode so QR code is sent to Telegram
         config.LOGIN_MODE = 'BOT_NOTIFY';
 
@@ -290,11 +291,11 @@ export class TelegramBot {
     startMsg += `  • 媒体下载: ${getMediaDownloadSummary()}\n`;
     startMsg += `  • 存储格式: ${config.SAVE_TYPES.join(', ')} | 数据库: ${config.DB_TYPE || '未开启'}\n\n`;
     startMsg += `⏳ 任务已在后台并发队列中执行，处理完毕后将推送汇总报告。`;
-    await Notifier.sendText(startMsg);
 
     // Run scraper in background
     (async () => {
       try {
+        await Notifier.sendText(startMsg);
         const scraper = new WeiboScraper();
         const summary = await scraper.run('TG_BOT');
         await closeDb();
@@ -395,12 +396,18 @@ export class TelegramBot {
       const uid = parts[2];
       const dateStr = parts.slice(3).join(' ');
       if (!uid || !dateStr) {
-        await Notifier.sendText("⚠️ 格式错误。正确格式：/user date <UID> <YYYY-MM-DD[THH:mm:ss]>");
+        await Notifier.sendText("⚠️ 格式错误。正确格式：/user date <UID> <YYYY-MM-DD[THH:mm:ss]|clear>");
       } else {
         const displayName = this.getBloggerDisplayName(uid);
-        const ok = setUserCursor(uid, dateStr);
+        const isClear = dateStr.toLowerCase() === 'clear' || dateStr.toLowerCase() === 'none';
+        const actualDate = isClear ? '' : dateStr;
+        const ok = setUserCursor(uid, actualDate);
         if (ok) {
-          await Notifier.sendText(`✅ 已成功为 ${displayName} 设置同步起点游标为 ${dateStr}`);
+          if (actualDate) {
+            await Notifier.sendText(`✅ 已成功为 ${displayName} 设置同步起点游标为 ${actualDate}`);
+          } else {
+            await Notifier.sendText(`✅ 已成功清除 ${displayName} 的同步游标（下次将从头全量同步或遵循 START_DATE）`);
+          }
         } else {
           await Notifier.sendText(`❌ 未找到 UID 为 ${uid} 的博主。`);
         }
@@ -412,11 +419,12 @@ export class TelegramBot {
         await Notifier.sendText("⚠️ 格式错误。正确格式：/user enddate <UID> <YYYY-MM-DD|clear>");
       } else {
         const displayName = this.getBloggerDisplayName(uid);
-        const actualDate = (dateStr.toLowerCase() === 'clear' || dateStr.toLowerCase() === 'none') ? '' : dateStr;
-        const ok = setUserEndDate(uid, actualDate);
+        const isClear = dateStr.toLowerCase() === 'clear' || dateStr.toLowerCase() === 'none';
+        const normalized = isClear ? '' : (formatCursorDateStr(dateStr) || dateStr);
+        const ok = setUserEndDate(uid, normalized);
         if (ok) {
-          if (actualDate) {
-            await Notifier.sendText(`✅ 已成功为 ${displayName} 设置同步结束时间为 ${actualDate}`);
+          if (normalized) {
+            await Notifier.sendText(`✅ 已成功为 ${displayName} 设置同步结束时间为 ${normalized}`);
           } else {
             await Notifier.sendText(`✅ 已成功清除 ${displayName} 的自定义结束时间（将默认遵循全局 END_DATE 或动态今天）`);
           }
@@ -577,9 +585,10 @@ export class TelegramBot {
     }
 
     this.isCrawling = true;
+    let startMsg = '';
     if (isDate) {
       const displayName = this.getBloggerDisplayName(resolvedUid);
-      let startMsg = `🚀 【已启动定向日期爬取任务】\n\n`;
+      startMsg = `🚀 【已启动定向日期爬取任务】\n\n`;
       startMsg += `👤 目标博主: ${displayName}\n`;
       startMsg += `📅 目标日期: ${targetDate}\n`;
       startMsg += `⚙️ 运行策略:\n`;
@@ -588,21 +597,20 @@ export class TelegramBot {
       startMsg += `  • 媒体下载: ${getMediaDownloadSummary()}\n`;
       startMsg += `  • 存储格式: ${config.SAVE_TYPES.join(', ')} | 数据库: ${config.DB_TYPE || '未开启'}\n\n`;
       startMsg += `⏳ 任务已在后台执行，爬取完成后将推送详细数据报告。`;
-      await Notifier.sendText(startMsg);
     } else {
-      let startMsg = `🚀 【已启动单条微博定向爬取任务】\n\n`;
+      startMsg = `🚀 【已启动单条微博定向爬取任务】\n\n`;
       startMsg += `🆔 目标对象: ${target}\n`;
       startMsg += `⚙️ 运行策略:\n`;
       startMsg += `  • 评论抓取: ${config.SCRAPE_COMMENTS ? `已开启 (最大上限: ${config.MAX_COMMENTS_PER_POST} 条)` : '已关闭'}\n`;
       startMsg += `  • 媒体下载: ${getMediaDownloadSummary()}\n`;
       startMsg += `  • 存储格式: ${config.SAVE_TYPES.join(', ')} | 数据库: ${config.DB_TYPE || '未开启'}\n\n`;
       startMsg += `⏳ 任务已在后台执行，爬取完成后将推送详细数据报告。`;
-      await Notifier.sendText(startMsg);
     }
 
     // Run in background
     (async () => {
       try {
+        await Notifier.sendText(startMsg);
         const scraper = new WeiboScraper();
         let res;
         if (isDate) {
@@ -673,24 +681,23 @@ export class TelegramBot {
     }
 
     this.isCrawling = true;
-
-    if (isDate) {
-      const displayName = this.getBloggerDisplayName(resolvedUid);
-      let startMsg = `🗑️ 【已启动定向日期物理清理任务】\n\n`;
-      startMsg += `👤 目标博主: ${displayName}\n`;
-      startMsg += `📅 目标日期: ${targetDate}\n`;
-      startMsg += `⚠️ 操作说明: 将彻底删除该日期的微博、评论、本地图片/视频等磁盘媒体文件，并同步更新 Markdown、JSON、CSV 及数据库。\n\n`;
-      startMsg += `⏳ 正在执行物理清除，完成后将推送清理明细报告...`;
-      await Notifier.sendText(startMsg);
-    } else {
-      let startMsg = `🗑️ 【已启动单条微博定向物理清理任务】\n\n`;
-      startMsg += `🆔 目标对象: ${target}\n`;
-      startMsg += `⚠️ 操作说明: 将彻底删除该微博的所有备份数据（包括关联本地多媒体资产），并同步剔除 Markdown、JSON、CSV 及数据库记录。\n\n`;
-      startMsg += `⏳ 正在执行物理清除，完成后将推送清理明细报告...`;
-      await Notifier.sendText(startMsg);
-    }
-
     try {
+      if (isDate) {
+        const displayName = this.getBloggerDisplayName(resolvedUid);
+        let startMsg = `🗑️ 【已启动定向日期物理清理任务】\n\n`;
+        startMsg += `👤 目标博主: ${displayName}\n`;
+        startMsg += `📅 目标日期: ${targetDate}\n`;
+        startMsg += `⚠️ 操作说明: 将彻底删除该日期的微博、评论、本地图片/视频等磁盘媒体文件，并同步更新 Markdown、JSON、CSV 及数据库。\n\n`;
+        startMsg += `⏳ 正在执行物理清除，完成后将推送清理明细报告...`;
+        await Notifier.sendText(startMsg);
+      } else {
+        let startMsg = `🗑️ 【已启动单条微博定向物理清理任务】\n\n`;
+        startMsg += `🆔 目标对象: ${target}\n`;
+        startMsg += `⚠️ 操作说明: 将彻底删除该微博的所有备份数据（包括关联本地多媒体资产），并同步剔除 Markdown、JSON、CSV 及数据库记录。\n\n`;
+        startMsg += `⏳ 正在执行物理清除，完成后将推送清理明细报告...`;
+        await Notifier.sendText(startMsg);
+      }
+
       let res;
       if (isDate) {
         const { deleteDateData } = require('../storage/deleteUtility');
@@ -795,10 +802,10 @@ export class TelegramBot {
 
             this.isCrawling = true;
             logger.info(`[Scheduler] 定时任务触发：开始进行自动增量爬取...`);
-            await Notifier.sendText(`⏰ [定时任务触发] 达到北京时间 ${pt.raw}，开始执行自动增量同步...`);
 
             (async () => {
               try {
+                await Notifier.sendText(`⏰ [定时任务触发] 达到北京时间 ${pt.raw}，开始执行自动增量同步...`);
                 const scraper = new WeiboScraper();
                 const summary = await scraper.run('SCHEDULE');
                 await closeDb();
