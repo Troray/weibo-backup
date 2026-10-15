@@ -1638,7 +1638,11 @@ export class WeiboScraper {
   /**
    * Crawl all posts of a specific date for a specific UID
    */
-  async crawlDateForUser(uid: string, dateStr: string, triggerSource: 'CLI' | 'TG_BOT' = 'CLI'): Promise<{ success: boolean; message: string }> {
+  async crawlDateForUser(uid: string, rawDateStr: string, triggerSource: 'CLI' | 'TG_BOT' = 'CLI'): Promise<{ success: boolean; message: string }> {
+    const dateMatch = rawDateStr.trim().match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+    const dateStr = dateMatch
+      ? `${dateMatch[1]}-${dateMatch[2].padStart(2, '0')}-${dateMatch[3].padStart(2, '0')}`
+      : rawDateStr.trim();
     // 自动同步并归档博主详细资料（<UID>.txt 及 profile/ 头像与背景图片）
     const knownName = this.getBloggerName(uid);
     const profile = await BloggerProfileManager.getInstance().ensureBloggerProfile(uid, knownName);
