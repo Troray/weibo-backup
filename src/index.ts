@@ -301,7 +301,6 @@ async function runSingleScrape() {
 
     const summary = await scraper.run('CLI');
     await closeDb();
-    logger.info('微博爬虫增量同步运行成功！');
     await Notifier.sendText(summary);
   } catch (error: any) {
     logger.error('微博爬虫运行中发生致命错误:', error);
