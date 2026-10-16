@@ -1,9 +1,8 @@
 # 🤖 Weibo Backup - 微博数据备份与下载小工具
 
-**weibo-backup** 是一个超轻量的微博备份与归档工具（weibo backup / weibo archiver）。支持扫码登录、全量/增量下载原画视频与实况照片，并导出为 Markdown、CSV、SQLite。Integrated with Telegram bot for interaction and notifications。
-基于 Node.js 与 TypeScript 开发，使用原生的网络请求和解析方式，能够帮你把指定博主的微博正文、高清大图、超清视频、Live Photo（实况照片动图）以及粉丝评论全部下载并保存到本地。
+**weibo-backup** 是一个超轻量的微博备份与归档工具（weibo backup / weibo archiver）。支持扫码登录、原画视频与实况照片的全量与增量下载，并可导出为 Markdown、CSV 或 SQLite。集成 Telegram 机器人交互，并支持企业微信/钉钉/飞书通知。适合需要长期保存微博内容与多格式导出的用户和团队。
 
-与常见的使用 Playwright/Puppeteer/Selenium 的爬虫不同，运行起来只占几十兆内存，不仅冷启动非常快，即使在几十块钱一年的超低配 VPS 服务器、NAS 或个人电脑后台挂着跑，也不会卡顿。
+基于 Node.js 与 TypeScript 开发，使用原生的网络请求和解析方式，与常见的使用 Playwright/Puppeteer/Selenium 的爬虫不同，运行起来只占几十兆内存，不仅冷启动非常快，即使在几十块钱一年的超低配 VPS 服务器、NAS 或个人电脑后台挂着跑，也不会卡顿。
 
 ---
 
